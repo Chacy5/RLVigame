@@ -1,29 +1,28 @@
 """
-LifeQuest Telegram Bot — Railway + PostgreSQL
+LifeQuest Telegram Bot — Railway + PostgreSQL + Webhook
 
-Перед деплоем:
-1) В репозитории должны лежать:
-   - main.py (этот файл)
-   - Лутбоксы.xlsx  (с листами:
-       "1. Маленькое счастье",
-       "2. Средний",
-       "3. Большой",
-       "4. Эпический",
-       "5. Легендарный",
-       "Мини-ивенты"
-     )
+Файлы в репозитории:
+- main.py (этот файл)
+- Лутбоксы.xlsx  (листы:
+    "1. Маленькое счастье",
+    "2. Средний",
+    "3. Большой",
+    "4. Эпический",
+    "5. Легендарный",
+    "Мини-ивенты"
+  )
 
-2) В Railway задать переменные окружения:
-   - TELEGRAM_BOT_TOKEN  (токен бота от @BotFather)
-   - DATABASE_URL        (postgres://... от Railway PostgreSQL plugin)
-   - PARTNER_USER_ID     (опционально, числовой telegram id твоего парня)
-   - LOOTBOX_XLS_PATH    (опционально, путь к экселю, по умолчанию 'Лутбоксы.xlsx')
+Переменные окружения Railway:
+- TELEGRAM_BOT_TOKEN  — токен бота от @BotFather
+- DATABASE_URL        — postgres://... от Railway PostgreSQL plugin
+- WEBHOOK_URL         — публичный URL Railway (например, https://myapp.up.railway.app)
+- PARTNER_USER_ID     — (опционально) числовой Telegram ID парня
+- LOOTBOX_XLS_PATH    — (опционально) путь к файлу Excel, по умолчанию 'Лутбоксы.xlsx'
 
-3) В requirements.txt:
-   python-telegram-bot==20.7
-   psycopg2-binary==2.9.9
-   pandas==2.2.2
-   openpyxl==3.1.5
+requirements.txt:
+- python-telegram-bot==20.7
+- psycopg2-binary==2.9.9
+- openpyxl==3.1.5
 """
 
 import logging
@@ -32,8 +31,9 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
--import pandas as pd
-+from openpyxl import load_workbook
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from openpyxl import load_workbook
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -43,7 +43,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ========= НАСТРОЙКИ =========
+# ========= НАСТРОЙКИ / ENV =========
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TELEGRAM_BOT_TOKEN:
@@ -53,16 +53,24 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("Не задан DATABASE_URL (строка подключения к PostgreSQL).")
 
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+if not WEBHOOK_URL:
+    raise RuntimeError("Не задан WEBHOOK_URL (публичный URL Railway).")
+
 PARTNER_USER_ID_ENV = os.getenv("PARTNER_USER_ID")
 PARTNER_USER_ID: Optional[int] = int(PARTNER_USER_ID_ENV) if PARTNER_USER_ID_ENV else None
 
 LOOTBOX_XLS_PATH = os.getenv("LOOTBOX_XLS_PATH", "Лутбоксы.xlsx")
+
+PORT = int(os.getenv("PORT", "8000"))  # Railway задаёт PORT, если нет — 8000
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+# ========= КОНСТАНТЫ И РЕДКОСТИ =========
 
 RARITY_ORDER = ["Common", "Uncommon", "Rare", "Epic", "Legendary"]
 
@@ -153,13 +161,12 @@ MAIN_QUESTS: Dict[str, MainQuest] = {
 }
 
 
-# ========= ЗАГРУЗКА ЛУТБОКСОВ И МИНИ-ИВЕНТОВ ИЗ EXCEL =========
+# ========= ЛУТБОКСЫ И МИНИ-ИВЕНТЫ ИЗ EXCEL (openpyxl) =========
 
 def _extract_rewards_ws(ws) -> List[str]:
-    """
-    ws — лист с таблицей вида:
+    """ws — лист с таблицей:
     | № | Награда |
-    Возвращаем список длиной 100, индекс 0 = номер 1, индекс 99 = номер 100.
+    Возвращаем список длиной 100, где индекс 0 — номер 1, индекс 99 — номер 100.
     """
     res: Dict[int, str] = {}
     first = True
@@ -175,7 +182,9 @@ def _extract_rewards_ws(ws) -> List[str]:
             continue
         if n < 1 or n > 100:
             continue
-        text = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
+        text = ""
+        if len(row) > 1 and row[1] is not None:
+            text = str(row[1]).strip()
         if not text or text.lower() == "nan":
             continue
         res[n] = text
@@ -185,7 +194,7 @@ def _extract_rewards_ws(ws) -> List[str]:
 def _extract_mini_events_ws(ws) -> List[Dict[str, str]]:
     """
     Лист "Мини-ивенты": первая колонка.
-    Строки вида "1. Название", потом одна или несколько строк описания.
+    Строки вида "1. Название", дальше 1+ строк описания.
     """
     values = [r[0] for r in ws.iter_rows(values_only=True) if r and r[0] is not None]
     lines = [str(x) for x in values]
@@ -194,8 +203,9 @@ def _extract_mini_events_ws(ws) -> List[Dict[str, str]]:
     first = True
     for line in lines:
         if first:
-            first = False  # заголовок
+            first = False  # предполагаем, что первая строка — заголовок
             continue
+        # Новая запись, если есть цифры и точка (например "1. Что-то")
         if any(ch.isdigit() for ch in line) and "." in line:
             if current:
                 events.append(current)
@@ -211,6 +221,7 @@ def _extract_mini_events_ws(ws) -> List[Dict[str, str]]:
 
 
 def _find_partner_indexes(rewards: List[str]) -> List[int]:
+    """Ищем награды, связанные с парнем (чтобы слать ему уведомление)."""
     idxs: List[int] = []
     for i, s in enumerate(rewards, start=1):
         low = s.lower()
@@ -587,8 +598,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if update.message:
         await update.message.reply_text(text, reply_markup=MAIN_MENU_KB, parse_mode="Markdown")
-    else:
-        await update.callback_query.edit_message_text(text, reply_markup=MAIN_MENU_KB, parse_mode="Markdown")
+    elif update.callback_query:
+        await update.callback_query.edit_message_text(
+            text, reply_markup=MAIN_MENU_KB, parse_mode="Markdown"
+        )
 
 
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1009,18 +1022,26 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Неизвестное действие")
 
 
-# ========= MAIN =========
+# ========= MAIN / WEBHOOK =========
 
 def main():
     load_lootboxes_from_excel()
     init_db()
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(callback_router))
 
-    logger.info("Bot started. Polling...")
-    app.run_polling()
+    logger.info("Starting bot with webhook...")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TELEGRAM_BOT_TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{TELEGRAM_BOT_TOKEN}",
+        drop_pending_updates=True,
+    )
 
 
 if __name__ == "__main__":
