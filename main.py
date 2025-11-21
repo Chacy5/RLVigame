@@ -1068,11 +1068,12 @@ def main():
     load_lootboxes_from_excel()
     init_db()
 
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-
-    # handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(callback_router))
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .updater(None)   # важно!
+        .build()
+    )
 
     logger.info("Starting bot with webhook...")
     app.run_webhook(
