@@ -370,7 +370,13 @@ def roll_reward(box_level: int) -> str:
 
 # ================== TELEGRAM-БОТ ==================
 
-from aiogram.client.default import DefaultBotProperties  bot = Bot(     token=BOT_TOKEN,     default=DefaultBotProperties(parse_mode="HTML") )
+from aiogram.client.default import DefaultBotProperties
+
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode="HTML"),
+)
+
 dp = Dispatcher()
 
 
