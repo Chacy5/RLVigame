@@ -32,9 +32,8 @@ import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-import pandas as pd
-import psycopg2
-from psycopg2.extras import RealDictCursor
+-import pandas as pd
++from openpyxl import load_workbook
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -156,34 +155,47 @@ MAIN_QUESTS: Dict[str, MainQuest] = {
 
 # ========= ЗАГРУЗКА ЛУТБОКСОВ И МИНИ-ИВЕНТОВ ИЗ EXCEL =========
 
-def _extract_rewards(df: pd.DataFrame) -> List[str]:
+def _extract_rewards_ws(ws) -> List[str]:
     """
-    Берём таблицу вида:
+    ws — лист с таблицей вида:
     | № | Награда |
-    и возвращаем список длиной 100, где индекс 0 — номер 1, 99 — номер 100.
+    Возвращаем список длиной 100, индекс 0 = номер 1, индекс 99 = номер 100.
     """
     res: Dict[int, str] = {}
-    for _, row in df.iterrows():
+    first = True
+    for row in ws.iter_rows(values_only=True):
+        if first:
+            first = False  # пропускаем заголовок
+            continue
+        if not row or row[0] is None:
+            continue
         try:
-            n = int(row.iloc[0])
+            n = int(row[0])
         except (ValueError, TypeError):
             continue
-        text = str(row.iloc[1]).strip()
+        if n < 1 or n > 100:
+            continue
+        text = str(row[1]).strip() if len(row) > 1 and row[1] is not None else ""
         if not text or text.lower() == "nan":
             continue
         res[n] = text
     return [res.get(i, f"Placeholder reward {i}") for i in range(1, 101)]
 
 
-def _extract_mini_events(df: pd.DataFrame) -> List[Dict[str, str]]:
+def _extract_mini_events_ws(ws) -> List[Dict[str, str]]:
     """
-    Лист "Мини-ивенты": первая колонка, 
-    строки вида "1. Название", дальше описание.
+    Лист "Мини-ивенты": первая колонка.
+    Строки вида "1. Название", потом одна или несколько строк описания.
     """
-    lines = [str(x) for x in df.iloc[:, 0].dropna().tolist()]
+    values = [r[0] for r in ws.iter_rows(values_only=True) if r and r[0] is not None]
+    lines = [str(x) for x in values]
     events: List[Dict[str, str]] = []
     current = None
-    for line in lines[1:]:  # пропускаем заголовок
+    first = True
+    for line in lines:
+        if first:
+            first = False  # заголовок
+            continue
         if any(ch.isdigit() for ch in line) and "." in line:
             if current:
                 events.append(current)
@@ -199,10 +211,6 @@ def _extract_mini_events(df: pd.DataFrame) -> List[Dict[str, str]]:
 
 
 def _find_partner_indexes(rewards: List[str]) -> List[int]:
-    """
-    Ищем награды, которые связаны с парнем ("от него"/"свидание"/и т.д.),
-    чтобы отправлять ему уведомление, когда они выпадают.
-    """
     idxs: List[int] = []
     for i, s in enumerate(rewards, start=1):
         low = s.lower()
@@ -226,13 +234,20 @@ def load_lootboxes_from_excel():
     global LOOTBOX_REWARD_TABLES, PARTNER_REWARD_INDEXES, MINI_EVENTS
 
     logger.info("Загружаю лутбоксы и мини-ивенты из '%s'...", LOOTBOX_XLS_PATH)
-    xls = pd.ExcelFile(LOOTBOX_XLS_PATH)
+    wb = load_workbook(LOOTBOX_XLS_PATH, data_only=True)
 
-    rewards_1 = _extract_rewards(xls.parse("1. Маленькое счастье"))
-    rewards_2 = _extract_rewards(xls.parse("2. Средний"))
-    rewards_3 = _extract_rewards(xls.parse("3. Большой"))
-    rewards_4 = _extract_rewards(xls.parse("4. Эпический"))
-    rewards_5 = _extract_rewards(xls.parse("5. Легендарный"))
+    ws1 = wb["1. Маленькое счастье"]
+    ws2 = wb["2. Средний"]
+    ws3 = wb["3. Большой"]
+    ws4 = wb["4. Эпический"]
+    ws5 = wb["5. Легендарный"]
+    ws_mini = wb["Мини-ивенты"]
+
+    rewards_1 = _extract_rewards_ws(ws1)
+    rewards_2 = _extract_rewards_ws(ws2)
+    rewards_3 = _extract_rewards_ws(ws3)
+    rewards_4 = _extract_rewards_ws(ws4)
+    rewards_5 = _extract_rewards_ws(ws5)
 
     LOOTBOX_REWARD_TABLES = {
         1: rewards_1,
@@ -250,8 +265,7 @@ def load_lootboxes_from_excel():
         5: _find_partner_indexes(rewards_5),
     }
 
-    mini_df = xls.parse("Мини-ивенты")
-    MINI_EVENTS = _extract_mini_events(mini_df)
+    MINI_EVENTS = _extract_mini_events_ws(ws_mini)
 
     logger.info(
         "Лутбоксы и мини-ивенты загружены. Box1=%d, Box2=%d, Box3=%d, Box4=%d, Box5=%d, mini_events=%d",
