@@ -1,5 +1,5 @@
 """
-LifeQuest Telegram Bot — Railway + PostgreSQL + Webhook
+LifeQuest Telegram Bot — Railway + PostgreSQL (pg8000) + Webhook
 
 Файлы в репозитории:
 - main.py (этот файл)
@@ -17,11 +17,11 @@ LifeQuest Telegram Bot — Railway + PostgreSQL + Webhook
 - DATABASE_URL        — postgres://... от Railway PostgreSQL plugin
 - WEBHOOK_URL         — публичный URL Railway (например, https://myapp.up.railway.app)
 - PARTNER_USER_ID     — (опционально) числовой Telegram ID парня
-- LOOTBOX_XLS_PATH    — (опционально) путь к файлу Excel, по умолчанию 'Лутбоксы.xlsx'
+- LOOTBOX_XLS_PATH    — (опционально) путь к Excel, по умолчанию 'Лутбоксы.xlsx'
 
 requirements.txt:
 - python-telegram-bot==20.7
-- psycopg2-binary==2.9.9
+- pg8000==1.31.2
 - openpyxl==3.1.5
 """
 
@@ -30,11 +30,10 @@ import os
 import random
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import pg8000
 from openpyxl import load_workbook
-
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -164,8 +163,10 @@ MAIN_QUESTS: Dict[str, MainQuest] = {
 # ========= ЛУТБОКСЫ И МИНИ-ИВЕНТЫ ИЗ EXCEL (openpyxl) =========
 
 def _extract_rewards_ws(ws) -> List[str]:
-    """ws — лист с таблицей:
+    """
+    ws — лист с таблицей:
     | № | Награда |
+
     Возвращаем список длиной 100, где индекс 0 — номер 1, индекс 99 — номер 100.
     """
     res: Dict[int, str] = {}
@@ -188,6 +189,7 @@ def _extract_rewards_ws(ws) -> List[str]:
         if not text or text.lower() == "nan":
             continue
         res[n] = text
+    # заполняем пропуски плейсхолдерами
     return [res.get(i, f"Placeholder reward {i}") for i in range(1, 101)]
 
 
@@ -359,10 +361,29 @@ DAILY_CATEGORIES = {
 }
 
 
-# ========= БАЗА ДАННЫХ (PostgreSQL) =========
+# ========= БАЗА ДАННЫХ (PostgreSQL через pg8000) =========
 
 def get_db():
-    conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+    """
+    Подключаемся к PostgreSQL через pg8000, парсим DATABASE_URL вручную.
+    Примеры URL:
+    - postgres://user:pass@host:port/dbname
+    - postgresql://user:pass@host:port/dbname
+    """
+    url = urlparse(DATABASE_URL)
+    user = url.username
+    password = url.password
+    host = url.hostname
+    port = url.port or 5432
+    database = url.path.lstrip("/")
+
+    conn = pg8000.connect(
+        user=user,
+        password=password,
+        host=host,
+        port=port,
+        database=database,
+    )
     return conn
 
 
@@ -448,7 +469,9 @@ def get_user_coins(user_id: int) -> int:
     cur.execute("SELECT coins FROM users WHERE user_id = %s;", (user_id,))
     row = cur.fetchone()
     conn.close()
-    return int(row["coins"] if row and row["coins"] is not None else 0)
+    if not row or row[0] is None:
+        return 0
+    return int(row[0])
 
 
 def reset_user(user_id: int):
@@ -490,7 +513,10 @@ def user_quest_status(user_id: int) -> Dict[str, bool]:
     )
     rows = cur.fetchall()
     conn.close()
-    return {row["quest_id"]: bool(row["completed"]) for row in rows}
+    status: Dict[str, bool] = {}
+    for quest_id, completed in rows:
+        status[str(quest_id)] = bool(completed)
+    return status
 
 
 def add_reward_record(user_id: int, source: str, rarity: str, lootbox_type: int, reward_text: str):
@@ -521,7 +547,19 @@ def get_rewards_for_user(user_id: int):
     )
     rows = cur.fetchall()
     conn.close()
-    return rows
+
+    result = []
+    for source, rarity, lootbox_type, reward_text, created_at in rows:
+        result.append(
+            {
+                "source": source,
+                "rarity": rarity,
+                "lootbox_type": lootbox_type,
+                "reward_text": reward_text,
+                "created_at": created_at,
+            }
+        )
+    return result
 
 
 # ========= ТЕКСТОВЫЕ АНИМАЦИИ И ПРОГРЕСС =========
@@ -911,8 +949,10 @@ async def lootbox_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # списываем монеты
     add_coins(user.id, -cost)
 
+    # d100
     table = LOOTBOX_REWARD_TABLES[box_type]
     roll = random.randint(1, 100)
     reward_text = table[roll - 1]
