@@ -43,61 +43,37 @@ DB_PATH = "game_bot.db"
 # Узнать можно у @userinfobot
 ALLOWED_USER_IDS = set()  # напр. {123456789}
 
+COIN_SYMBOL = "𖠇"
+
+# удобный формат монет
+def coin_text(amount: int) -> str:
+    return f"{COIN_SYMBOL} {amount}"
+
 
 # ================== САНИТИЗАЦИЯ СИМВОЛОВ ==================
 
-EMOJI_POOL = [
-    "☽",
-    "𓀩",
-    "𓀿",
-    "𓂀",
-    "☸",
-    "𖥘",
-    "𓁹",
-    "𓊀",
-    "𓊖",
-    "𓊗",
-    "𓅓",
-    "𓃭",
-    "𓃰",
-    "𓆣",
-    "𓆤",
-    "𓆱",
-    "𓉐",
-    "𓏏",
-    "✦",
-    "✺",
-    "⟡",
-    "✷",
-    "❂",
-    "✶",
-    "✧",
-    "❉",
-    "✵",
-    "✢",
-    "✥",
-    "✹",
-    "✱",
-    "✫",
-    "✲",
-    "⚚",
-    "⚘",
-    "✦",
-    "✷",
-    "❂",
-    "✧",
-    "✢",
-]
-EMOJI_PATTERN = re.compile(
-    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F3FB-\U0001F3FF]+"
-)
+EMOJI_POOL: List[str] = []
+EMOJI_PATTERN = re.compile("")
+ALLOWED_SYMBOLS = {
+    "✓",
+    "✗",
+    "•",
+    "◻",
+    "◼",
+    "◇",
+    "◆",
+    "○",
+    "●",
+    "▤",
+    "⬢",
+    "⬣",
+    COIN_SYMBOL,
+}
 
 
 def clean_text_symbols(text: str) -> str:
-    if not isinstance(text, str):
-        return text
-    cycle = itertools.cycle(EMOJI_POOL)
-    return EMOJI_PATTERN.sub(lambda _m: next(cycle), text)
+    # Сейчас оставляем символы как есть, чтобы дизайн оставался предсказуемым.
+    return text if isinstance(text, str) else text
 
 
 def clean_markup(markup):
@@ -420,11 +396,11 @@ REWARD_TABLE = {lvl: list(entries) for lvl, entries in DEFAULT_REWARD_TABLE.item
 
 # Карты-награды за Мейн-квесты
 REWARD_CARDS = {
-    "common": {"label": "🟦 Обычная карта награды"},
-    "uncommon": {"label": "🟩 Необычная карта награды"},
-    "rare": {"label": "🟪 Редкая карта награды"},
-    "epic": {"label": "🟧 Эпическая карта награды"},
-    "legendary": {"label": "🟥 Легендарная карта награды"},
+    "common": {"label": "□ Карта награды"},
+    "uncommon": {"label": "▤ Необычная карта награды"},
+    "rare": {"label": "◆ Редкая карта награды"},
+    "epic": {"label": "⬣ Эпическая карта награды"},
+    "legendary": {"label": "⬢ Легендарная карта награды"},
 }
 RARITY_TO_BOX_LEVEL = {
     "common": 1,
@@ -490,27 +466,27 @@ SHOP_PRICE_PRESETS = [10, 20, 30, 40, 50, 75, 100, 150, 200, 300, 500]
 SHOP_FILTERS: Dict[int, Dict] = defaultdict(lambda: {"category": "all", "price": "all"})
 SHOP_PAGE_SIZE = 8
 SHOP_CATEGORY_ICONS = {
-    "mtg": "𓂀",
-    "mtg_cash": "𓊗",
-    "selfcare": "𓁹",
-    "games": "☸",
-    "tech": "𓆤",
-    "food": "𓉐",
-    "home": "𓏏",
-    "comfort": "𓃭",
-    "style": "✦",
-    "hobby": "𓀿",
-    "travel": "✺",
+    "mtg": "◇",
+    "mtg_cash": "◆",
+    "selfcare": "✿",
+    "games": "✪",
+    "tech": "⌘",
+    "food": "✦",
+    "home": "⌂",
+    "comfort": "☁",
+    "style": "✧",
+    "hobby": "✎",
+    "travel": "⇢",
     "default": "⟡",
 }
 
 MENU_ICONS = {
-    "map": "☽",
-    "dailies": "𓀩",
-    "loot": "𓂀",
-    "shop": "✦",
-    "inv": "𓊗",
-    "profile": "𓁹",
+    "map": "☑",
+    "dailies": "✓",
+    "loot": "◇",
+    "shop": "◆",
+    "inv": "◻",
+    "profile": "○",
 }
 
 # Основные квесты — под твой реальный план
@@ -1832,7 +1808,7 @@ def build_map_view(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
         levels.setdefault(lvl, []).append(q)
 
     kb = []
-    lines = ["📍 <b>Карта</b>\n"]
+    lines = ["☑ <b>Карта</b>\n"]
     for lvl in sorted(levels):
         quests = levels[lvl]
         statuses = []
@@ -1843,11 +1819,11 @@ def build_map_view(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
                 st = "locked"
             statuses.append(st)
         if all(s == "done" for s in statuses):
-            mark = "✅"
+            mark = "✓"
         elif any(s == "active" for s in statuses):
-            mark = "🟡"
+            mark = "•"
         else:
-            mark = "🔒"
+            mark = "✗"
         title = LEVEL_LABELS.get(lvl, f"Уровень {lvl}")
         date_range = LEVEL_META.get(lvl, {}).get("dates", "")
         date_label = f" ({date_range})" if date_range else ""
@@ -1868,7 +1844,7 @@ def build_map_view(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
 def build_profile_view(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
     coins = get_coins(uid)
     progress = level_progress(uid)
-    text = f"💰 Монет: <b>{coins}</b>\n🏃 {progress}\n\nСброс удаляет монеты, награды и прогресс."
+    text = f"💰 Баланс: <b>{coin_text(coins)}</b>\n🏃 {progress}\n\nСброс удаляет {COIN_SYMBOL}, награды и прогресс."
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Сбросить игру", callback_data="reset:ask")],
@@ -1887,15 +1863,9 @@ def build_dailies_view(
     category: str = "all",
 ) -> Tuple[str, InlineKeyboardMarkup]:
     today = date.today().isoformat()
-    lines = ["📝 <b>Дейлики</b>"]
+    total_all = len(DAILY_TASKS)
+    lines = ["✓ <b>Дейлики</b>"]
     cat_label = THEME_LABELS.get(category, "Все категории") if category != "all" else "Все категории"
-    if category != "all" or filter_coin != "all" or search_term:
-        line = f"{cat_label}"
-        if filter_coin != "all":
-            line += f" · {filter_coin} мон"
-        if search_term:
-            line += f" · «{search_term}»"
-        lines.append(line)
 
     tasks_list = list(DAILY_TASKS.items())
     if category != "all":
@@ -1917,7 +1887,15 @@ def build_dailies_view(
     start = page * page_size
     end = start + page_size
     page_tasks = tasks_list[start:end]
-    if total > page_size:
+    lines.append(f"{start+1 if total else 0}-{min(end, total)} / {total} из {total_all}")
+    if category != "all" or filter_coin != "all" or search_term:
+        line = f"{cat_label}"
+        if filter_coin != "all":
+            line += f" · {filter_coin}"
+        if search_term:
+            line += f" · «{search_term}»"
+        lines.append(line)
+    if total_pages > 1:
         lines.append(f"{page+1}/{total_pages}")
 
     kb = [
@@ -1933,17 +1911,17 @@ def build_dailies_view(
             InlineKeyboardButton(
                 text=f"Категория: {cat_label[:12]}", callback_data="dailies:catmenu"
             ),
-            InlineKeyboardButton(text="🔍 Поиск", callback_data="dailies:search"),
+            InlineKeyboardButton(text="⌕ Поиск", callback_data="dailies:search"),
         ],
     ]
     for code, info in page_tasks:
         done = get_daily_done(uid, code, today)
-        mark = "✅" if done else "⬜"
-        lines.append(f"{mark} {info['title']} (+{info['coins']} монет)")
+        mark = "✓" if done else "◻"
+        lines.append(f"{mark} {info['title']} (+{info['coins']} {COIN_SYMBOL})")
         kb.append(
             [
                 InlineKeyboardButton(
-                    text=f"{'Отменить' if done else 'Сделать'}: {info['title'][:18]}…",
+                    text=f"{'Отменить' if done else 'Сделать'}: {info['title'][:26]}…",
                     callback_data=f"daily:{code}",
                 )
             ]
@@ -1999,8 +1977,8 @@ def build_shop_view(uid: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]
     coins = get_coins(uid)
 
     lines = [
-        "🏪 <b>Магазин</b>",
-        f"Монет: <b>{coins}</b>",
+        "◆ <b>Магазин</b>",
+        f"{coin_text(coins)}",
         f"{cat_label} · {price_label}",
         "",
     ]
@@ -2009,7 +1987,7 @@ def build_shop_view(uid: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]
             lines.append(f"Страница {page + 1}/{total_pages}")
         for item in page_items:
             icon = _shop_icon(item)
-            lines.append(f"{icon} {item.get('name')} — {item.get('price')} мон")
+            lines.append(f"{icon} {item.get('name')} — {coin_text(int(item.get('price', 0)))}")
     else:
         lines.append("По этим фильтрам ничего не нашлось.")
 
@@ -2024,7 +2002,7 @@ def build_shop_view(uid: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]
         kb.append(
             [
                 InlineKeyboardButton(
-                    text=f"🛒 {item.get('name')[:22]} — {item.get('price')}",
+                    text=f"✓ {item.get('name')[:22]} — {coin_text(int(item.get('price', 0)))}",
                     callback_data=f"shop:item:{item.get('id')}",
                 )
             ]
@@ -2259,9 +2237,9 @@ async def cmd_start(message: Message):
         set_main_status(message.from_user.id, 1, "active")
 
     text = (
-        "🌈 <b>Игра запущена!</b>\n"
+        "✶ <b>Игра запущена!</b>\n"
         "Квесты, дейлики и награды ждут.\n"
-        f"Монет сейчас: <b>{coins}</b>.\n/menu"
+        f"Сейчас: <b>{coin_text(coins)}</b>.\n/menu"
     )
     await message.answer(text, reply_markup=reply_menu_kb())
 
@@ -2274,7 +2252,7 @@ async def cmd_menu(message: Message):
 
     coins = get_coins(message.from_user.id)
     await message.answer(
-        f"🏠 <b>Меню</b>\nМонет: <b>{coins}</b>",
+        f"🏠 <b>Меню</b>\nБаланс: <b>{coin_text(coins)}</b>",
         reply_markup=reply_menu_kb(),
     )
 
@@ -2305,10 +2283,10 @@ async def on_menu_buttons(message: Message):
     elif text.startswith(MENU_ICONS["loot"]):
         uid = message.from_user.id
         coins = get_coins(uid)
-        text = "🎁 <b>Лутбоксы</b>\n"
+        text = "◇ <b>Лутбоксы</b>\n"
         for lvl, box in LOOTBOXES.items():
-            text += f"{lvl}. {box['name']} — <b>{box['price']}</b> монет\n"
-        text += f"\nМонет: <b>{coins}</b>"
+            text += f"{lvl}. {box['name']} — <b>{coin_text(box['price'])}</b>\n"
+        text += f"\nБаланс: <b>{coin_text(coins)}</b>"
         kb = []
         for lvl, box in LOOTBOXES.items():
             kb.append(
@@ -2329,8 +2307,8 @@ async def on_menu_buttons(message: Message):
         rewards = get_active_rewards(uid)
         if not rewards:
             text = (
-                "📦 Инвентарь пуст.\n"
-                "Заработай монеты или открой лутбокс 🎁."
+                "◻ Инвентарь пуст.\n"
+                f"Заработай {COIN_SYMBOL} или открой лутбокс."
             )
             kb = [
                 [
@@ -2341,16 +2319,16 @@ async def on_menu_buttons(message: Message):
                 [InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")],
             ]
         else:
-            lines = ["📦 <b>Инвентарь</b>\n"]
+            lines = ["◻ <b>Инвентарь</b>\n"]
             kb = []
             for rid, name, lvl in rewards:
                 if lvl == 0:
-                    prefix = "🃏"
+                    prefix = "✶"
                 elif lvl < 0:
-                    prefix = "🛍️"
+                    prefix = "◆"
                 else:
                     prefix = f"[L{lvl}]"
-                lines.append(f"• {prefix} {name}")
+                lines.append(f"{prefix} {name}")
                 kb.append(
                     [
                         InlineKeyboardButton(
@@ -2397,10 +2375,10 @@ async def cb_menu(callback: CallbackQuery):
     # ЛУТБОКСЫ
     elif section == "loot":
         coins = get_coins(uid)
-        text = "🎁 <b>Лутбоксы</b>\n"
+        text = "◇ <b>Лутбоксы</b>\n"
         for lvl, box in LOOTBOXES.items():
-            text += f"{lvl}. {box['name']} — <b>{box['price']}</b> монет\n"
-        text += f"\nМонет: <b>{coins}</b>"
+            text += f"{lvl}. {box['name']} — <b>{coin_text(box['price'])}</b>\n"
+        text += f"\nБаланс: <b>{coin_text(coins)}</b>"
 
         kb = []
         for lvl, box in LOOTBOXES.items():
@@ -2429,8 +2407,8 @@ async def cb_menu(callback: CallbackQuery):
         rewards = get_active_rewards(uid)
         if not rewards:
             text = (
-                "📦 Инвентарь пуст.\n"
-                "Заработай монеты или открой лутбокс 🎁."
+                "◻ Инвентарь пуст.\n"
+                f"Заработай {COIN_SYMBOL} или открой лутбокс."
             )
             kb = [
                 [
@@ -2441,16 +2419,16 @@ async def cb_menu(callback: CallbackQuery):
                 [InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")],
             ]
         else:
-            lines = ["📦 <b>Инвентарь</b>\n"]
+            lines = ["◻ <b>Инвентарь</b>\n"]
             kb = []
             for rid, name, lvl in rewards:
                 if lvl == 0:
-                    prefix = "🃏"
+                    prefix = "✶"
                 elif lvl < 0:
-                    prefix = "🛍️"
+                    prefix = "◆"
                 else:
                     prefix = f"[L{lvl}]"
-                lines.append(f"• {prefix} {name}")
+                lines.append(f"{prefix} {name}")
                 kb.append(
                     [
                         InlineKeyboardButton(
@@ -2518,7 +2496,7 @@ async def cb_open_quest(callback: CallbackQuery):
     card_label = REWARD_CARDS[quest["reward_card"]]["label"]
     box_lvl = RARITY_TO_BOX_LEVEL.get(quest["reward_card"], 1)
     parts.append(
-        f"Награда: <b>{quest['reward_coins']}</b> монет и выбор 1 награды "
+        f"Награда: <b>{coin_text(quest['reward_coins'])}</b> и выбор 1 награды "
         f"из лутбокса L{box_lvl} ({card_label})."
     )
     text = "\n\n".join(parts)
@@ -2584,7 +2562,7 @@ async def cb_quest_done(callback: CallbackQuery):
 
     parts = [
         f"🎉 <b>Квест {quest.get('code', idx)} выполнен!</b>",
-        f"Ты получила <b>{coins_reward}</b> монет.",
+        f"Ты получила <b>{coin_text(coins_reward)}</b>.",
         f"Выбери 1 из 3 наград лутбокса L{box_level}:",
     ]
     kb = []
@@ -2691,11 +2669,11 @@ async def cb_level(callback: CallbackQuery):
         if status != "done" and not _quest_dependency_met(uid, q):
             status = "locked"
         if status == "done":
-            mark = "✅"
+            mark = "✓"
         elif status == "active":
-            mark = "🟡"
+            mark = "•"
         else:
-            mark = "🔒"
+            mark = "✗"
         label = q.get("code", str(q["index"]))
         lines.append(f"{mark} {label}. {q['title']}")
         kb.append(
@@ -2745,7 +2723,7 @@ async def cb_reset_ask(callback: CallbackQuery):
         ]
     )
     await callback.message.edit_text(
-        "Сбросить игру? Будут удалены монеты, прогресс квестов и награды.",
+        f"Сбросить игру? Будут удалены {COIN_SYMBOL}, прогресс квестов и награды.",
         reply_markup=kb,
     )
     await callback.answer()
@@ -2760,7 +2738,7 @@ async def cb_reset_do(callback: CallbackQuery):
     coins = reset_user_progress(uid)
     _ensure_unlocks(uid)
     await callback.message.edit_text(
-        f"Игра сброшена. Монет: {coins}. Прогресс очищен.\n/menu",
+        f"Игра сброшена. Баланс: {coin_text(coins)}. Прогресс очищен.\n/menu",
         reply_markup=reply_menu_kb(),
     )
     await callback.answer("Сброшено")
@@ -2800,12 +2778,12 @@ async def cb_daily(callback: CallbackQuery):
         set_daily_done(uid, code, today, True)
         coins = DAILY_TASKS[code]["coins"]
         update_coins(uid, coins)
-        await callback.answer(f"+{coins} монет 💰", show_alert=False)
+        await callback.answer(f"+{coin_text(coins)}", show_alert=False)
     else:
         set_daily_done(uid, code, today, False)
         coins = DAILY_TASKS[code]["coins"]
         update_coins(uid, -coins)
-        await callback.answer(f"-{coins} монет (отмена задания)", show_alert=False)
+        await callback.answer(f"-{coin_text(coins)} (отмена)", show_alert=False)
 
     text, kb = build_dailies_view(uid)
     await callback.message.edit_text(text, reply_markup=kb)
@@ -2823,7 +2801,7 @@ async def cb_dailies_filter(callback: CallbackQuery):
     if len(parts) >= 2 and parts[1] == "search":
         DAILY_SEARCH_WAIT[uid] = True
         await callback.answer()
-        await callback.message.answer("🔍 Введи текст для поиска дейликов (или /cancel)")
+        await callback.message.answer("⌕ Введи текст для поиска дейликов (или /cancel)")
         return
     if len(parts) >= 2 and parts[1] == "catmenu":
         buttons = [
@@ -2987,8 +2965,8 @@ async def cb_shop_item(callback: CallbackQuery):
     coins = get_coins(uid)
     lines = [
         f"{icon} <b>{item.get('name')}</b>",
-        f"{item.get('price')} мон · {cat_label}",
-        f"Баланс: {coins}",
+        f"{coin_text(int(item.get('price', 0)))} · {cat_label}",
+        f"Баланс: {coin_text(coins)}",
     ]
     if item.get("description"):
         lines.append("")
@@ -2996,7 +2974,8 @@ async def cb_shop_item(callback: CallbackQuery):
     kb = [
         [
             InlineKeyboardButton(
-                text=f"Купить за {item.get('price')} мон", callback_data=f"shop:buy:{item.get('id')}"
+                text=f"Купить за {coin_text(int(item.get('price', 0)))}",
+                callback_data=f"shop:buy:{item.get('id')}",
             )
         ],
         [InlineKeyboardButton(text="⬅ К списку", callback_data="menu:shop")],
@@ -3022,7 +3001,7 @@ async def cb_shop_buy(callback: CallbackQuery):
     price = int(item.get("price", 0))
     coins = get_coins(uid)
     if coins < price:
-        await callback.answer("Недостаточно монет 💸", show_alert=True)
+        await callback.answer(f"Недостаточно {COIN_SYMBOL} 💸", show_alert=True)
         return
 
     update_coins(uid, -price)
@@ -3030,8 +3009,8 @@ async def cb_shop_buy(callback: CallbackQuery):
     new_balance = get_coins(uid)
     await callback.answer("Награда добавлена в инвентарь ✨", show_alert=False)
     await callback.message.answer(
-        f"🛒 Куплено: <b>{item.get('name')}</b> за {price} монет.\n"
-        f"Осталось монет: <b>{new_balance}</b>.\n"
+        f"🛒 Куплено: <b>{item.get('name')}</b> за {coin_text(price)}.\n"
+        f"Осталось: <b>{coin_text(new_balance)}</b>.\n"
         "Награда появилась в инвентаре. /menu"
     )
 
@@ -3054,7 +3033,7 @@ async def cb_buy(callback: CallbackQuery):
 
     coins = get_coins(uid)
     if coins < box["price"]:
-        await callback.answer("Недостаточно монет 💸", show_alert=True)
+        await callback.answer(f"Недостаточно {COIN_SYMBOL} 💸", show_alert=True)
         return
 
     # списываем монеты
