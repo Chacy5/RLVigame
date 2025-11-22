@@ -504,6 +504,15 @@ SHOP_CATEGORY_ICONS = {
     "default": "⟡",
 }
 
+MENU_ICONS = {
+    "map": "☽",
+    "dailies": "𓀩",
+    "loot": "𓂀",
+    "shop": "✦",
+    "inv": "𓊗",
+    "profile": "𓁹",
+}
+
 # Основные квесты — под твой реальный план
 MAIN_QUESTS = [
     {
@@ -2145,36 +2154,58 @@ patch_aiogram_rendering()
 
 def main_menu_kb() -> InlineKeyboardMarkup:
     kb = [
-        [InlineKeyboardButton(text="📍 Квест-карта", callback_data="menu:map")],
-        [InlineKeyboardButton(text="📝 Дейлики", callback_data="menu:dailies")],
-        [InlineKeyboardButton(text="🎁 Лутбоксы", callback_data="menu:loot")],
-        [InlineKeyboardButton(text="🏪 Магазин", callback_data="menu:shop")],
-        [InlineKeyboardButton(text="📦 Инвентарь", callback_data="menu:inv")],
-        [InlineKeyboardButton(text="💰 Профиль", callback_data="menu:profile")],
+        [
+            InlineKeyboardButton(
+                text=f"{MENU_ICONS['map']} Квест-карта", callback_data="menu:map"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{MENU_ICONS['dailies']} Дейлики", callback_data="menu:dailies"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{MENU_ICONS['loot']} Лутбоксы", callback_data="menu:loot"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{MENU_ICONS['shop']} Магазин", callback_data="menu:shop"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{MENU_ICONS['inv']} Инвентарь", callback_data="menu:inv"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{MENU_ICONS['profile']} Профиль", callback_data="menu:profile"
+            )
+        ],
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def reply_menu_kb():
-    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-
     return ReplyKeyboardMarkup(
         keyboard=[
-        [
-            KeyboardButton(text="📍 Квест-карта"),
-            KeyboardButton(text="📝 Дейлики"),
+            [
+                KeyboardButton(text=f"{MENU_ICONS['map']} Квест-карта"),
+                KeyboardButton(text=f"{MENU_ICONS['dailies']} Дейлики"),
+            ],
+            [
+                KeyboardButton(text=f"{MENU_ICONS['loot']} Лутбоксы"),
+                KeyboardButton(text=f"{MENU_ICONS['shop']} Магазин"),
+            ],
+            [
+                KeyboardButton(text=f"{MENU_ICONS['inv']} Инвентарь"),
+                KeyboardButton(text=f"{MENU_ICONS['profile']} Профиль"),
+            ],
         ],
-        [
-            KeyboardButton(text="🎁 Лутбоксы"),
-            KeyboardButton(text="🏪 Магазин"),
-        ],
-        [
-            KeyboardButton(text="📦 Инвентарь"),
-            KeyboardButton(text="💰 Профиль"),
-        ],
-    ],
-    resize_keyboard=True,
-)
+        resize_keyboard=True,
+    )
 
 
 def access_denied(user_id: int) -> bool:
@@ -2250,7 +2281,14 @@ async def cmd_menu(message: Message):
 
 @dp.message(
     F.text.in_(
-        {"📍 Квест-карта", "📝 Дейлики", "🎁 Лутбоксы", "🏪 Магазин", "📦 Инвентарь", "💰 Профиль"}
+        {
+            f"{MENU_ICONS['map']} Квест-карта",
+            f"{MENU_ICONS['dailies']} Дейлики",
+            f"{MENU_ICONS['loot']} Лутбоксы",
+            f"{MENU_ICONS['shop']} Магазин",
+            f"{MENU_ICONS['inv']} Инвентарь",
+            f"{MENU_ICONS['profile']} Профиль",
+        }
     )
 )
 async def on_menu_buttons(message: Message):
@@ -2258,13 +2296,13 @@ async def on_menu_buttons(message: Message):
         await message.answer("Этот бот приватный 🌙")
         return
     text = message.text
-    if text == "📍 Квест-карта":
+    if text.startswith(MENU_ICONS["map"]):
         view_text, kb = build_map_view(message.from_user.id)
         await message.answer(view_text, reply_markup=kb)
-    elif text == "📝 Дейлики":
+    elif text.startswith(MENU_ICONS["dailies"]):
         view_text, kb = build_dailies_view(message.from_user.id)
         await message.answer(view_text, reply_markup=kb)
-    elif text == "🎁 Лутбоксы":
+    elif text.startswith(MENU_ICONS["loot"]):
         uid = message.from_user.id
         coins = get_coins(uid)
         text = "🎁 <b>Лутбоксы</b>\n"
@@ -2283,10 +2321,10 @@ async def on_menu_buttons(message: Message):
             )
         kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
         await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-    elif text == "🏪 Магазин":
+    elif text.startswith(MENU_ICONS["shop"]):
         view_text, kb = build_shop_view(message.from_user.id)
         await message.answer(view_text, reply_markup=kb)
-    elif text == "📦 Инвентарь":
+    elif text.startswith(MENU_ICONS["inv"]):
         uid = message.from_user.id
         rewards = get_active_rewards(uid)
         if not rewards:
@@ -2326,7 +2364,7 @@ async def on_menu_buttons(message: Message):
             )
             text = "\n".join(lines)
         await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-    elif text == "💰 Профиль":
+    elif text.startswith(MENU_ICONS["profile"]):
         profile_text, kb = build_profile_view(message.from_user.id)
         await message.answer(profile_text, reply_markup=kb)
 
