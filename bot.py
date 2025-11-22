@@ -384,6 +384,17 @@ DAILY_TASKS = {
     "rest_1": {"title": "Осознанный отдых 15 минут без телефона", "coins": 2},
 }
 
+LEVEL_LABELS = {
+    0: "🟣 УРОВЕНЬ 0 — СТАРТ",
+    1: "🟢 УРОВЕНЬ 1 — НАЧАЛО ДВИЖЕНИЯ",
+    2: "🔵 УРОВЕНЬ 2 — РАЗГОНЯЕМСЯ",
+    3: "🟡 УРОВЕНЬ 3 — ПОДДЕРЖИВАЕМ РИТМ",
+    4: "🔥 УРОВЕНЬ 4 — УСКОРЕНИЕ",
+    5: "🛠 УРОВЕНЬ 5 — РЕМОНТНЫЙ МАРАФОН",
+    6: "🏡 УРОВЕНЬ 6 — СДАЧА КВАРТИРЫ",
+    7: "🚉 УРОВЕНЬ 7 — НАКОПЛЕНИЕ НА ТБИЛИСИ + ПЕРЕЕЗД",
+}
+
 
 def _excel_col_to_index(col: str) -> int:
     """Преобразует буквенный адрес столбца (A, B, AA...) в индекс с нуля."""
@@ -630,6 +641,16 @@ def load_daily_tasks_from_docx(docx_path: str) -> Dict[str, Dict]:
     return tasks
 
 
+def _quest_level(q: Dict) -> int:
+    code = q.get("code", "")
+    if isinstance(code, str) and "." in code:
+        try:
+            return int(code.split(".", 1)[0])
+        except ValueError:
+            return 0
+    return 0
+
+
 def refresh_tasks_from_docx():
     """Обновляет MAIN_QUESTS и DAILY_TASKS из docx, иначе оставляет дефолты."""
     global MAIN_QUESTS, DAILY_TASKS
@@ -770,34 +791,33 @@ async def cb_menu(callback: CallbackQuery):
 
     # КВЕСТ-КАРТА
     if section == "map":
-        lines = ["📍 <b>Квест-карта</b>\n"]
+        levels = {}
         for q in MAIN_QUESTS:
-            status = get_main_status(uid, q["index"])
-            if status == "done":
+            lvl = _quest_level(q)
+            levels.setdefault(lvl, []).append(q)
+
+        kb = []
+        lines = ["📍 <b>Квест-карта</b>\n"]
+        for lvl in sorted(levels):
+            quests = levels[lvl]
+            statuses = [get_main_status(uid, q["index"]) for q in quests]
+            if all(s == "done" for s in statuses):
                 mark = "✅"
-            elif status == "active":
+            elif any(s == "active" for s in statuses):
                 mark = "🟡"
             else:
                 mark = "🔒"
-            label = q.get("code", str(q["index"]))
-            lines.append(f"{mark} {label}. {q['title']}")
-
-        active_index = None
-        for q in MAIN_QUESTS:
-            if get_main_status(uid, q["index"]) == "active":
-                active_index = q["index"]
-                break
-
-        kb = []
-        if active_index is not None:
+            title = LEVEL_LABELS.get(lvl, f"Уровень {lvl}")
+            lines.append(f"{mark} {title}")
             kb.append(
                 [
                     InlineKeyboardButton(
-                        text="📖 Открыть активный квест",
-                        callback_data=f"quest:{active_index}",
+                        text=f"Открыть {title[:28]}",
+                        callback_data=f"level:{lvl}",
                     )
                 ]
             )
+
         kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
 
         await callback.message.edit_text(
@@ -1010,6 +1030,52 @@ async def cb_quest_done(callback: CallbackQuery):
         "Открыть меню: /menu"
     )
     await callback.message.answer(text)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("level:"))
+async def cb_level(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if access_denied(uid):
+        await callback.answer("Этот бот приватный 🌙", show_alert=True)
+        return
+
+    try:
+        lvl = int(callback.data.split(":", 1)[1])
+    except ValueError:
+        await callback.answer("Уровень не найден", show_alert=True)
+        return
+
+    quests = [q for q in MAIN_QUESTS if _quest_level(q) == lvl]
+    if not quests:
+        await callback.answer("Нет квестов для уровня", show_alert=True)
+        return
+
+    lines = [LEVEL_LABELS.get(lvl, f"Уровень {lvl}"), ""]
+    kb = []
+    for q in quests:
+        status = get_main_status(uid, q["index"])
+        if status == "done":
+            mark = "✅"
+        elif status == "active":
+            mark = "🟡"
+        else:
+            mark = "🔒"
+        label = q.get("code", str(q["index"]))
+        lines.append(f"{mark} {label}. {q['title']}")
+        kb.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Открыть {label}", callback_data=f"quest:{q['index']}"
+                )
+            ]
+        )
+
+    kb.append([InlineKeyboardButton(text="⬅ К карте", callback_data="menu:map")])
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+    )
     await callback.answer()
 
 
