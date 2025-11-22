@@ -1,11 +1,9 @@
 import asyncio
-import json
-import logging
 import os
 import random
 import sqlite3
 from datetime import datetime, date
-from typing import List, Tuple, Optional
+from typing import List, Tuple
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -15,39 +13,13 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-
-# ================== ЛОГИ ==================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 
 # ================== НАСТРОЙКИ ==================
 
+BOT_TOKEN = os.getenv("BOT_TOKEN", "PASTE_YOUR_TOKEN_HERE")
 DB_PATH = "game_bot.db"
-
-# 1) Пытаемся прочитать токен из users.json
-def load_token_from_file() -> Optional[str]:
-    try:
-        with open("users.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
-        # подстрой под свою структуру файла, если нужно
-        return data.get("token") or data.get("BOT_TOKEN")
-    except FileNotFoundError:
-        return None
-    except Exception as e:
-        logger.warning(f"Не удалось прочитать users.json: {e}")
-        return None
-
-
-BOT_TOKEN = load_token_from_file() or os.getenv("BOT_TOKEN", "")
-
-if not BOT_TOKEN or BOT_TOKEN == "PASTE_YOUR_TOKEN_HERE":
-    # Не падаем с ошибкой, но явно пишем в логи
-    logger.error("BOT_TOKEN не задан или задан как PASTE_YOUR_TOKEN_HERE. "
-                 "Укажи реальный токен в users.json или переменной окружения BOT_TOKEN!")
 
 # Если хочешь сделать бота приватным — впиши сюда свой Telegram ID
 # Узнать можно у @userinfobot
@@ -61,39 +33,45 @@ def get_conn():
 
 
 def init_db():
-    logger.info("Инициализирую БД…")
     conn = get_conn()
     c = conn.cursor()
 
-    c.execute("""
+    c.execute(
+        """
     CREATE TABLE IF NOT EXISTS users(
-        user_id    INTEGER PRIMARY KEY,
-        coins      INTEGER DEFAULT 0,
+        user_id   INTEGER PRIMARY KEY,
+        coins     INTEGER DEFAULT 0,
         created_at TEXT
     )
-    """)
+    """
+    )
 
-    c.execute("""
+    c.execute(
+        """
     CREATE TABLE IF NOT EXISTS rewards(
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id    INTEGER,
-        name       TEXT,
-        box_level  INTEGER,
-        used       INTEGER DEFAULT 0,
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id   INTEGER,
+        name      TEXT,
+        box_level INTEGER,
+        used      INTEGER DEFAULT 0,
         created_at TEXT
     )
-    """)
+    """
+    )
 
-    c.execute("""
+    c.execute(
+        """
     CREATE TABLE IF NOT EXISTS main_progress(
         user_id    INTEGER,
         node_index INTEGER,
         status     TEXT,
         PRIMARY KEY(user_id, node_index)
     )
-    """)
+    """
+    )
 
-    c.execute("""
+    c.execute(
+        """
     CREATE TABLE IF NOT EXISTS daily_tasks(
         user_id   INTEGER,
         task_code TEXT,
@@ -101,11 +79,11 @@ def init_db():
         done      INTEGER DEFAULT 0,
         PRIMARY KEY(user_id, task_code, day)
     )
-    """)
+    """
+    )
 
     conn.commit()
     conn.close()
-    logger.info("Схема БД инициализирована.")
 
 
 def get_or_create_user(user_id: int) -> int:
@@ -133,11 +111,14 @@ def get_or_create_user(user_id: int) -> int:
 def update_coins(user_id: int, delta: int):
     conn = get_conn()
     c = conn.cursor()
-    c.execute("""
+    c.execute(
+        """
         INSERT INTO users(user_id, coins, created_at)
         VALUES(?,?,?)
         ON CONFLICT(user_id) DO UPDATE SET coins = coins + ?
-    """, (user_id, 0, datetime.utcnow().isoformat(), delta))
+    """,
+        (user_id, 0, datetime.utcnow().isoformat(), delta),
+    )
     conn.commit()
     conn.close()
 
@@ -199,11 +180,14 @@ def get_main_status(user_id: int, node_index: int) -> str:
 def set_main_status(user_id: int, node_index: int, status: str):
     conn = get_conn()
     c = conn.cursor()
-    c.execute("""
+    c.execute(
+        """
         INSERT INTO main_progress(user_id, node_index, status)
         VALUES(?,?,?)
         ON CONFLICT(user_id, node_index) DO UPDATE SET status = ?
-    """, (user_id, node_index, status, status))
+    """,
+        (user_id, node_index, status, status),
+    )
     conn.commit()
     conn.close()
 
@@ -211,10 +195,13 @@ def set_main_status(user_id: int, node_index: int, status: str):
 def get_daily_done(user_id: int, task_code: str, day: str) -> bool:
     conn = get_conn()
     c = conn.cursor()
-    c.execute("""
+    c.execute(
+        """
         SELECT done FROM daily_tasks
         WHERE user_id = ? AND task_code = ? AND day = ?
-    """, (user_id, task_code, day))
+    """,
+        (user_id, task_code, day),
+    )
     row = c.fetchone()
     conn.close()
     return bool(row[0]) if row else False
@@ -223,29 +210,29 @@ def get_daily_done(user_id: int, task_code: str, day: str) -> bool:
 def set_daily_done(user_id: int, task_code: str, day: str, done: bool):
     conn = get_conn()
     c = conn.cursor()
-    c.execute("""
+    c.execute(
+        """
         INSERT INTO daily_tasks(user_id, task_code, day, done)
         VALUES(?,?,?,?)
         ON CONFLICT(user_id, task_code, day) DO UPDATE SET done = ?
-    """, (user_id, task_code, day, 1 if done else 0, 1 if done else 0))
+    """,
+        (user_id, task_code, day, 1 if done else 0, 1 if done else 0),
+    )
     conn.commit()
     conn.close()
 
 
 # ================== ИГРОВАЯ КОНФИГА ==================
-# ВАЖНО: здесь ты потом просто подставишь данные из своего DOC/XLSX
-# Сейчас стоят примеры, чтобы бот уже работал.
 
 LOOTBOXES = {
-    1: {"name": "Little Happiness",   "price": 10},
-    2: {"name": "Medium Loot Box",    "price": 20},
-    3: {"name": "Large Loot Box",     "price": 40},
-    4: {"name": "Epic Loot Box",      "price": 80},
+    1: {"name": "Little Happiness", "price": 10},
+    2: {"name": "Medium Loot Box", "price": 20},
+    3: {"name": "Large Loot Box", "price": 40},
+    4: {"name": "Epic Loot Box", "price": 80},
     5: {"name": "Legendary Loot Box", "price": 150},
 }
 
-# Упрощённые d100-таблицы для лутбоксов.
-# Из твоей lootbox.xlsx мы сможем потом просто переписать сюда значения.
+# Упрощённые d100-таблицы для лутбоксов (можешь позже вставить свои большие)
 REWARD_TABLE = {
     1: [
         (40, "🧁 Маленькая вкусняшка"),
@@ -281,23 +268,23 @@ REWARD_TABLE = {
 
 # Карты-награды за Мейн-квесты
 REWARD_CARDS = {
-    "common":    {"label": "🟦 Обычная карта награды"},
-    "uncommon":  {"label": "🟩 Необычная карта награды"},
-    "rare":      {"label": "🟪 Редкая карта награды"},
-    "epic":      {"label": "🟧 Эпическая карта награды"},
+    "common": {"label": "🟦 Обычная карта награды"},
+    "uncommon": {"label": "🟩 Необычная карта награды"},
+    "rare": {"label": "🟪 Редкая карта награды"},
+    "epic": {"label": "🟧 Эпическая карта награды"},
     "legendary": {"label": "🟥 Легендарная карта награды"},
 }
 
-# Здесь пока примерный набор мейн-квестов.
-# Позже просто заменим на структуру из твоего документа.
+# Основные квесты — под твой реальный план
 MAIN_QUESTS = [
     {
         "index": 1,
         "title": "Инвентаризация денег и долгов",
         "desc": (
-            "1) Выписать ВСЕ долги и обязательства.\n"
-            "2) Выписать ежемесячные обязательные траты.\n"
-            "3) Посчитать, сколько нужно в месяц, чтобы жить без паники."
+            "1) Выписать ВСЕ долги и обязательства: ипотека, 500$ за подъем материалов, "
+            "штраф 100 лари, 70 000₽ рассрочка и т.д.\n"
+            "2) Отдельно выписать ежемесячные расходы: коммуналка, интернет, телефон, собака.\n"
+            "3) Подсчитать, сколько нужно в месяц, чтобы жить без паники."
         ),
         "reward_coins": 20,
         "reward_card": "uncommon",
@@ -306,9 +293,9 @@ MAIN_QUESTS = [
         "index": 2,
         "title": "План закрытия долгов до лета",
         "desc": (
-            "1) Разбить крупные долги на месячные шаги.\n"
-            "2) Определить приоритеты.\n"
-            "3) Составить черновой график погашения."
+            "1) Разбить крупные долги на месячные шаги до лета.\n"
+            "2) Решить, с чего начинаешь (что критичнее).\n"
+            "3) Составить черновой график: какие суммы в какие месяцы гасишь."
         ),
         "reward_coins": 25,
         "reward_card": "uncommon",
@@ -317,37 +304,66 @@ MAIN_QUESTS = [
         "index": 3,
         "title": "Разогрев апворка",
         "desc": (
-            "1) Обновить портфолио.\n"
-            "2) Подготовить 2–3 шаблона откликов.\n"
+            "1) Обновить портфолио и профиль под текущий фокус.\n"
+            "2) Подготовить 2–3 шаблона откликов под разные типы заказов.\n"
             "3) Сделать минимум 5 осознанных откликов за неделю."
         ),
         "reward_coins": 30,
         "reward_card": "rare",
     },
+    {
+        "index": 4,
+        "title": "Первая «рабочая неделя апворка»",
+        "desc": (
+            "1) 5 рабочих дней с хотя бы одним фокус-слотом апворка.\n"
+            "2) Вести учёт: сколько часов и сколько заработала.\n"
+            "3) Подвести итоги в конце недели (что сработало / что нет)."
+        ),
+        "reward_coins": 40,
+        "reward_card": "rare",
+    },
+    {
+        "index": 5,
+        "title": "План ремонта квартиры под сдачу",
+        "desc": (
+            "1) Разбить квартиру на зоны: ванная, кухня, спальни, коридор, балконы.\n"
+            "2) Для каждой зоны решить уровень ремонта: «просто, но красиво».\n"
+            "3) Оценить примерный бюджет по зонам + приоритеты (что в первую очередь)."
+        ),
+        "reward_coins": 50,
+        "reward_card": "epic",
+    },
+    {
+        "index": 6,
+        "title": "Финансовый план: ремонт + жизнь 3/3",
+        "desc": (
+            "1) Посчитать, сколько нужно накопить к маю на ремонт.\n"
+            "2) Посчитать бюджет жизни 3/3: Батуми ↔ Тбилиси (аренда, метро, еда).\n"
+            "3) Разбить всё это на месячные цели по накоплениям."
+        ),
+        "reward_coins": 60,
+        "reward_card": "epic",
+    },
+    {
+        "index": 7,
+        "title": "Тест-поездка: жизнь 3/3 с Тбилиси",
+        "desc": (
+            "1) Выбрать район и примерную квартиру под тестовый заезд в Тбилиси.\n"
+            "2) Составить план: сколько там живёте, сколько в Батуми.\n"
+            "3) Сделать первый пробный заезд (даже короткий) и записать ощущения."
+        ),
+        "reward_coins": 80,
+        "reward_card": "legendary",
+    },
 ]
 
-# Дейлики (примеры; потом заменим на твой список)
+# Дейлики
 DAILY_TASKS = {
-    "work_1": {
-        "title": "1 фокус-слот работы (25–50 мин)",
-        "coins": 4
-    },
-    "work_2": {
-        "title": "Ответить на важные сообщения/клиентов",
-        "coins": 3
-    },
-    "self_1": {
-        "title": "Мини-уход за собой",
-        "coins": 2
-    },
-    "home_1": {
-        "title": "10 минут уборки/разбора завалов",
-        "coins": 2
-    },
-    "rest_1": {
-        "title": "Осознанный отдых 15 минут без телефона",
-        "coins": 2
-    },
+    "work_1": {"title": "1 фокус-слот работы (25–50 мин)", "coins": 4},
+    "work_2": {"title": "Ответить на важные сообщения/клиентов", "coins": 3},
+    "self_1": {"title": "Мини-уход за собой (душ/крем/что-то милое)", "coins": 2},
+    "home_1": {"title": "10 минут уборки или разбора завалов", "coins": 2},
+    "rest_1": {"title": "Осознанный отдых 15 минут без телефона", "coins": 2},
 }
 
 
@@ -359,9 +375,12 @@ def roll_reward(box_level: int) -> str:
     return f"Сюрприз (d100={roll})"
 
 
-# ================== TELEGRAM-БОТ (aiogram 3) ==================
+# ================== TELEGRAM-БОТ ==================
 
-bot = Bot(BOT_TOKEN, parse_mode="HTML")
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
 dp = Dispatcher()
 
 
@@ -382,6 +401,7 @@ def access_denied(user_id: int) -> bool:
 
 
 # ---------- АНИМАЦИИ ----------
+
 
 async def show_path_animation(message: Message, quest_title: str):
     frames = [
@@ -411,6 +431,7 @@ async def show_card_animation(message: Message, card_label: str):
 
 
 # ---------- /start и /menu ----------
+
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
@@ -450,6 +471,7 @@ async def cmd_menu(message: Message):
 
 # ---------- Обработка разделов меню ----------
 
+
 @dp.callback_query(F.data.startswith("menu:"))
 async def cb_menu(callback: CallbackQuery):
     uid = callback.from_user.id
@@ -480,12 +502,14 @@ async def cb_menu(callback: CallbackQuery):
 
         kb = []
         if active_index is not None:
-            kb.append([
-                InlineKeyboardButton(
-                    text="📖 Открыть активный квест",
-                    callback_data=f"quest:{active_index}",
-                )
-            ])
+            kb.append(
+                [
+                    InlineKeyboardButton(
+                        text="📖 Открыть активный квест",
+                        callback_data=f"quest:{active_index}",
+                    )
+                ]
+            )
         kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
 
         await callback.message.edit_text(
@@ -503,12 +527,14 @@ async def cb_menu(callback: CallbackQuery):
             done = get_daily_done(uid, code, today)
             mark = "✅" if done else "⬜"
             lines.append(f"{mark} {info['title']} (+{info['coins']} монет)")
-            kb.append([
-                InlineKeyboardButton(
-                    text=f"{'Отменить' if done else 'Сделать'}: {info['title'][:14]}…",
-                    callback_data=f"daily:{code}",
-                )
-            ])
+            kb.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{'Отменить' if done else 'Сделать'}: {info['title'][:14]}…",
+                        callback_data=f"daily:{code}",
+                    )
+                ]
+            )
 
         kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
 
@@ -523,16 +549,20 @@ async def cb_menu(callback: CallbackQuery):
         text = "🎁 <b>Лутбоксы</b>\n\n"
         for lvl, box in LOOTBOXES.items():
             text += f"{lvl}. {box['name']} — <b>{box['price']}</b> монет\n"
-        text += f"\nУ тебя сейчас <b>{coins}</b> монет.\nВыбери лутбокс, чтобы купить и открыть."
+        text += (
+            f"\nУ тебя сейчас <b>{coins}</b> монет.\nВыбери лутбокс, чтобы купить и открыть."
+        )
 
         kb = []
         for lvl, box in LOOTBOXES.items():
-            kb.append([
-                InlineKeyboardButton(
-                    text=f"{lvl}. {box['name']}",
-                    callback_data=f"buy:{lvl}",
-                )
-            ])
+            kb.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{lvl}. {box['name']}",
+                        callback_data=f"buy:{lvl}",
+                    )
+                ]
+            )
         kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
 
         await callback.message.edit_text(
@@ -550,7 +580,11 @@ async def cb_menu(callback: CallbackQuery):
                 "Или получи карту-награду за Мейн-квест."
             )
             kb = [
-                [InlineKeyboardButton(text="🎁 К лутбоксам", callback_data="menu:loot")],
+                [
+                    InlineKeyboardButton(
+                        text="🎁 К лутбоксам", callback_data="menu:loot"
+                    )
+                ],
                 [InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")],
             ]
         else:
@@ -562,13 +596,17 @@ async def cb_menu(callback: CallbackQuery):
                 else:
                     prefix = f"[L{lvl}]"
                 lines.append(f"• {prefix} {name}")
-                kb.append([
-                    InlineKeyboardButton(
-                        text=f"Использовать: {name[:18]}…",
-                        callback_data=f"use:{rid}",
-                    )
-                ])
-            kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
+                kb.append(
+                    [
+                        InlineKeyboardButton(
+                            text=f"Использовать: {name[:18]}…",
+                            callback_data=f"use:{rid}",
+                        )
+                    ]
+                )
+            kb.append(
+                [InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")]
+            )
             text = "\n".join(lines)
 
         await callback.message.edit_text(
@@ -589,6 +627,7 @@ async def cb_menu(callback: CallbackQuery):
 
 
 # ---------- КВЕСТЫ ----------
+
 
 @dp.callback_query(F.data.startswith("quest:"))
 async def cb_open_quest(callback: CallbackQuery):
@@ -618,7 +657,11 @@ async def cb_open_quest(callback: CallbackQuery):
         f"{REWARD_CARDS[quest['reward_card']]['label']}."
     )
     kb = [
-        [InlineKeyboardButton(text="✅ Я это сделала", callback_data=f"quest_done:{idx}")],
+        [
+            InlineKeyboardButton(
+                text="✅ Я это сделала", callback_data=f"quest_done:{idx}"
+            )
+        ],
         [InlineKeyboardButton(text="⬅ Назад к карте", callback_data="menu:map")],
     ]
     await callback.message.answer(
@@ -683,6 +726,7 @@ async def cb_quest_done(callback: CallbackQuery):
 
 # ---------- ДЕЙЛИКИ ----------
 
+
 @dp.callback_query(F.data.startswith("daily:"))
 async def cb_daily(callback: CallbackQuery):
     uid = callback.from_user.id
@@ -717,12 +761,14 @@ async def cb_daily(callback: CallbackQuery):
         done = get_daily_done(uid, c, today)
         mark = "✅" if done else "⬜"
         lines.append(f"{mark} {info['title']} (+{info['coins']} монет)")
-        kb.append([
-            InlineKeyboardButton(
-                text=f"{'Отменить' if done else 'Сделать'}: {info['title'][:14]}…",
-                callback_data=f"daily:{c}",
-            )
-        ])
+        kb.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{'Отменить' if done else 'Сделать'}: {info['title'][:14]}…",
+                    callback_data=f"daily:{c}",
+                )
+            ]
+        )
     kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
 
     await callback.message.edit_text(
@@ -732,6 +778,7 @@ async def cb_daily(callback: CallbackQuery):
 
 
 # ---------- ЛУТБОКСЫ ----------
+
 
 @dp.callback_query(F.data.startswith("buy:"))
 async def cb_buy(callback: CallbackQuery):
@@ -775,6 +822,7 @@ async def cb_buy(callback: CallbackQuery):
 
 # ---------- ИСПОЛЬЗОВАНИЕ НАГРАД ----------
 
+
 @dp.callback_query(F.data.startswith("use:"))
 async def cb_use(callback: CallbackQuery):
     uid = callback.from_user.id
@@ -794,9 +842,10 @@ async def cb_use(callback: CallbackQuery):
 
 # ================== ЗАПУСК ==================
 
+
 async def main():
     init_db()
-    logger.info("Запуск бота (long polling)…")
+    print("Bot started")
     await dp.start_polling(bot)
 
 
