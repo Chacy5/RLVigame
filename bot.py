@@ -204,6 +204,18 @@ def init_db():
     """
     )
 
+    c.execute(
+        """
+    CREATE TABLE IF NOT EXISTS quest_choices(
+        token      TEXT PRIMARY KEY,
+        user_id    INTEGER,
+        box_level  INTEGER,
+        options_json TEXT,
+        created_at TEXT
+    )
+    """
+    )
+
     conn.commit()
     conn.close()
 
@@ -283,6 +295,51 @@ def mark_reward_used(reward_id: int):
     conn = get_conn()
     c = conn.cursor()
     c.execute("UPDATE rewards SET used = 1 WHERE id = ?", (reward_id,))
+    conn.commit()
+    conn.close()
+
+
+def save_quest_choice(user_id: int, token: str, box_level: int, options: List[str]):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        """
+        INSERT INTO quest_choices(token, user_id, box_level, options_json, created_at)
+        VALUES(?,?,?,?,?)
+        ON CONFLICT(token) DO UPDATE SET
+            user_id=excluded.user_id,
+            box_level=excluded.box_level,
+            options_json=excluded.options_json,
+            created_at=excluded.created_at
+        """,
+        (token, user_id, box_level, json.dumps(options, ensure_ascii=False), datetime.utcnow().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_quest_choice(token: str) -> Optional[Dict]:
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT user_id, box_level, options_json FROM quest_choices WHERE token = ?",
+        (token,),
+    )
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        options = json.loads(row[2]) if row[2] else []
+    except Exception:
+        options = []
+    return {"user_id": row[0], "box_level": row[1], "options": options}
+
+
+def clear_quest_choice(token: str):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM quest_choices WHERE token = ?", (token,))
     conn.commit()
     conn.close()
 
@@ -1271,6 +1328,9 @@ LEVEL_SCHEDULE = {
 }
 
 DAILY_SEARCH_WAIT: Dict[int, bool] = {}
+DAILY_FILTER_STATE: Dict[int, Dict] = defaultdict(
+    lambda: {"filter_coin": "all", "category": "all", "page": 0, "search": ""}
+)
 
 
 def _excel_col_to_index(col: str) -> int:
@@ -1863,6 +1923,13 @@ def build_dailies_view(
     category: str = "all",
 ) -> Tuple[str, InlineKeyboardMarkup]:
     today = date.today().isoformat()
+    DAILY_FILTER_STATE[uid] = {
+        "filter_coin": filter_coin,
+        "category": category,
+        "page": page,
+        "search": search_term,
+    }
+
     total_all = len(DAILY_TASKS)
     lines = ["✓ <b>Дейлики</b>"]
     cat_label = THEME_LABELS.get(category, "Все категории") if category != "all" else "Все категории"
@@ -1944,9 +2011,38 @@ def build_dailies_view(
     if nav_row:
         kb.append(nav_row)
 
+    kb.append([InlineKeyboardButton(text="Категории", callback_data="dailies:catmenu")])
     kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
 
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_dailies_category_menu() -> Tuple[str, InlineKeyboardMarkup]:
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="Все категории", callback_data="dailies:cat:all:all:0"
+            )
+        ]
+    ]
+    row = []
+    for theme in DAILY_THEMES:
+        row.append(
+            InlineKeyboardButton(
+                text=THEME_LABELS.get(theme, theme),
+                callback_data=f"dailies:cat:{theme}:all:0",
+            )
+        )
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="⌕ Поиск", callback_data="dailies:search")])
+    buttons.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
+    return "✓ Дейлики.\nВыбери категорию или поиск.", InlineKeyboardMarkup(
+        inline_keyboard=buttons
+    )
 
 
 def _shop_icon(item: Dict) -> str:
@@ -2020,6 +2116,7 @@ def build_shop_view(uid: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]
     if nav_row:
         kb.append(nav_row)
 
+    kb.append([InlineKeyboardButton(text="Категории", callback_data="shop:catmenu")])
     kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -2052,6 +2149,18 @@ def build_shop_categories_kb(uid: int) -> InlineKeyboardMarkup:
         kb.append(row)
     kb.append([InlineKeyboardButton(text="⬅ Назад", callback_data="menu:shop")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_shop_category_menu(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    kb = build_shop_categories_kb(uid)
+    # Заменим кнопку назад на выход в меню профиля
+    buttons = []
+    for row in kb.inline_keyboard:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
+    return "◆ Магазин.\nВыбери категорию или фильтр по цене.", InlineKeyboardMarkup(
+        inline_keyboard=buttons
+    )
 
 
 def build_shop_price_kb(uid: int) -> InlineKeyboardMarkup:
@@ -2278,7 +2387,7 @@ async def on_menu_buttons(message: Message):
         view_text, kb = build_map_view(message.from_user.id)
         await message.answer(view_text, reply_markup=kb)
     elif text.startswith(MENU_ICONS["dailies"]):
-        view_text, kb = build_dailies_view(message.from_user.id)
+        view_text, kb = build_dailies_category_menu()
         await message.answer(view_text, reply_markup=kb)
     elif text.startswith(MENU_ICONS["loot"]):
         uid = message.from_user.id
@@ -2300,7 +2409,7 @@ async def on_menu_buttons(message: Message):
         kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
         await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
     elif text.startswith(MENU_ICONS["shop"]):
-        view_text, kb = build_shop_view(message.from_user.id)
+        view_text, kb = build_shop_category_menu(message.from_user.id)
         await message.answer(view_text, reply_markup=kb)
     elif text.startswith(MENU_ICONS["inv"]):
         uid = message.from_user.id
@@ -2369,7 +2478,7 @@ async def cb_menu(callback: CallbackQuery):
 
     # ДЕЙЛИКИ
     elif section == "dailies":
-        text, kb = build_dailies_view(uid)
+        text, kb = build_dailies_category_menu()
         await callback.message.edit_text(text, reply_markup=kb)
 
     # ЛУТБОКСЫ
@@ -2399,7 +2508,7 @@ async def cb_menu(callback: CallbackQuery):
 
     # МАГАЗИН НАГРАД
     elif section == "shop":
-        text, kb = build_shop_view(uid)
+        text, kb = build_shop_category_menu(uid)
         await callback.message.edit_text(text, reply_markup=kb)
 
     # ИНВЕНТАРЬ
@@ -2557,6 +2666,7 @@ async def cb_quest_done(callback: CallbackQuery):
         "options": options,
         "box_level": box_level,
     }
+    save_quest_choice(uid, token, box_level, options)
 
     _grant_level_final(uid, _quest_level(quest))
 
@@ -2596,7 +2706,11 @@ async def cb_pick_reward(callback: CallbackQuery):
     user_choices = QUEST_CHOICES.get(uid, {})
     payload = user_choices.get(token)
     if not payload:
-        await callback.answer("Выбор недоступен", show_alert=True)
+        payload = load_quest_choice(token)
+        if payload and payload.get("user_id") != uid:
+            payload = None
+    if not payload:
+        await callback.answer("Выбор недоступен (устарело). Закрой квест заново.", show_alert=True)
         return
 
     options = payload.get("options", [])
@@ -2612,6 +2726,7 @@ async def cb_pick_reward(callback: CallbackQuery):
     user_choices.pop(token, None)
     if not user_choices:
         QUEST_CHOICES.pop(uid, None)
+    clear_quest_choice(token)
 
     await callback.answer("Награда добавлена в инвентарь ✨", show_alert=False)
     await callback.message.answer(
@@ -2752,7 +2867,14 @@ async def on_daily_search(message: Message):
     if not query or query.startswith("/"):
         await message.answer("Поиск отменён.")
         return
-    text, kb = build_dailies_view(uid, search_term=query)
+    state = DAILY_FILTER_STATE.get(uid, {"filter_coin": "all", "category": "all"})
+    text, kb = build_dailies_view(
+        uid,
+        filter_coin=state.get("filter_coin", "all"),
+        category=state.get("category", "all"),
+        search_term=query,
+        page=0,
+    )
     await message.answer(text, reply_markup=kb)
 
 
@@ -2804,30 +2926,8 @@ async def cb_dailies_filter(callback: CallbackQuery):
         await callback.message.answer("⌕ Введи текст для поиска дейликов (или /cancel)")
         return
     if len(parts) >= 2 and parts[1] == "catmenu":
-        buttons = [
-            [
-                InlineKeyboardButton(
-                    text="Все категории", callback_data="dailies:cat:all:all:0"
-                )
-            ]
-        ]
-        row = []
-        for theme in DAILY_THEMES:
-            row.append(
-                InlineKeyboardButton(
-                    text=THEME_LABELS.get(theme, theme),
-                    callback_data=f"dailies:cat:{theme}:all:0",
-                )
-            )
-            if len(row) == 2:
-                buttons.append(row)
-                row = []
-        if row:
-            buttons.append(row)
-        buttons.append([InlineKeyboardButton(text="⬅ Назад", callback_data="menu:dailies")])
-        await callback.message.edit_text(
-            "Выбери категорию:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-        )
+        text, kb = build_dailies_category_menu()
+        await callback.message.edit_text(text, reply_markup=kb)
         await callback.answer()
         return
 
@@ -2893,11 +2993,8 @@ async def cb_shop_catmenu(callback: CallbackQuery):
     if access_denied(uid):
         await callback.answer("Этот бот приватный 🌙", show_alert=True)
         return
-    kb = build_shop_categories_kb(uid)
-    await callback.message.edit_text(
-        "Категория:",
-        reply_markup=kb,
-    )
+    text, kb = build_shop_category_menu(uid)
+    await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
 
