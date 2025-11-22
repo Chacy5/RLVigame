@@ -15,7 +15,7 @@ from aiogram.types import (
 from dotenv import load_dotenv
 
 # ------------------------
-# НАСТРОЙКИ ЛОГИРОВАНИЯ
+# НАСТРОЙКИ ЛОГИРОВАНЯ
 # ------------------------
 logging.basicConfig(
     level=logging.INFO,
