@@ -1,14 +1,17 @@
 {
   "7423539505": {
     "tokens": {
+      "ORDER": 2,
+      "LOG": 2,
+      "FIX": 1,
+      "HYDR": 1
     },
-    "rp": 0,
-    "bp_level": 0
+    "rp": 5,
+    "bp_level": 1
   },
   "353779981": {
     "tokens": {},
     "rp": 0,
     "bp_level": 0
   }
-
 }

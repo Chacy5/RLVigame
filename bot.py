@@ -2,8 +2,10 @@ import asyncio
 import os
 import random
 import sqlite3
+import zipfile
 from datetime import datetime, date
-from typing import List, Tuple
+from typing import Dict, List, Tuple
+from xml.etree import ElementTree as ET
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -233,7 +235,8 @@ LOOTBOXES = {
 }
 
 # Упрощённые d100-таблицы для лутбоксов (можешь позже вставить свои большие)
-REWARD_TABLE = {
+LOOTBOX_REWARDS_XLSX = "lootbox.xlsx"
+DEFAULT_REWARD_TABLE = {
     1: [
         (40, "🧁 Маленькая вкусняшка"),
         (70, "☕ Маленький кофе"),
@@ -265,6 +268,7 @@ REWARD_TABLE = {
         (100, "💖 Техника + MTG + подарок от себя"),
     ],
 }
+REWARD_TABLE = {lvl: list(entries) for lvl, entries in DEFAULT_REWARD_TABLE.items()}
 
 # Карты-награды за Мейн-квесты
 REWARD_CARDS = {
@@ -367,9 +371,145 @@ DAILY_TASKS = {
 }
 
 
+def _excel_col_to_index(col: str) -> int:
+    """Преобразует буквенный адрес столбца (A, B, AA...) в индекс с нуля."""
+    idx = 0
+    for ch in col:
+        if not ch.isalpha():
+            break
+        idx = idx * 26 + (ord(ch.upper()) - ord("A") + 1)
+    return idx - 1 if idx else 0
+
+
+def _read_cell_value(cell, shared_strings, ns: str) -> str:
+    """Возвращает текстовое значение ячейки (shared strings / inline / число)."""
+    cell_type = cell.attrib.get("t")
+    v = cell.find(f"{ns}v")
+    if v is not None:
+        if cell_type == "s":
+            idx = int(v.text)
+            return shared_strings[idx] if 0 <= idx < len(shared_strings) else ""
+        return v.text or ""
+    inline = cell.find(f"{ns}is/{ns}t")
+    return inline.text if inline is not None else ""
+
+
+def _read_shared_strings(zf: zipfile.ZipFile, ns: str) -> List[str]:
+    try:
+        root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+    except KeyError:
+        return []
+
+    strings = []
+    for si in root.findall(f"{ns}si"):
+        texts = [t.text or "" for t in si.findall(f".//{ns}t")]
+        strings.append("".join(texts))
+    return strings
+
+
+def load_lootbox_reward_tables_from_excel(xlsx_path: str) -> Dict[int, List[Tuple[int, str]]]:
+    """
+    Читает lootbox.xlsx и собирает таблицы наград для уровней 1–5.
+    Ожидается, что названия листов начинаются с «1. », «2. » и т.д.
+    """
+    if not os.path.exists(xlsx_path):
+        return {}
+
+    try:
+        with zipfile.ZipFile(xlsx_path) as zf:
+            ns_main = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+            ns_rel = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+
+            workbook = ET.fromstring(zf.read("xl/workbook.xml"))
+            rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+            rel_map = {
+                rel.attrib["Id"]: rel.attrib["Target"]
+                for rel in rels.findall(f"{ns_rel}Relationship")
+            }
+
+            sheet_paths: Dict[int, str] = {}
+            for sheet in workbook.findall(f"{ns_main}sheet"):
+                name = sheet.attrib.get("name", "")
+                rid = sheet.attrib.get(
+                    "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+                )
+                if not rid or rid not in rel_map:
+                    continue
+
+                prefix = name.split(".", 1)[0].strip()
+                if prefix.isdigit():
+                    lvl = int(prefix)
+                    if lvl in LOOTBOXES:
+                        sheet_paths[lvl] = f"xl/{rel_map[rid]}"
+
+            shared_strings = _read_shared_strings(zf, ns_main)
+            reward_tables: Dict[int, List[Tuple[int, str]]] = {}
+
+            for lvl, sheet_path in sheet_paths.items():
+                try:
+                    sheet_xml = ET.fromstring(zf.read(sheet_path))
+                except KeyError:
+                    continue
+
+                rows = []
+                for row in sheet_xml.findall(f"{ns_main}sheetData/{ns_main}row"):
+                    row_values = {}
+                    for cell in row.findall(f"{ns_main}c"):
+                        ref = cell.attrib.get("r", "")
+                        col_letters = "".join(ch for ch in ref if ch.isalpha())
+                        col_idx = _excel_col_to_index(col_letters)
+                        row_values[col_idx] = _read_cell_value(cell, shared_strings, ns_main)
+                    rows.append([row_values.get(0, ""), row_values.get(1, "")])
+
+                # ищем строку-заголовок с d100 и собираем данные ниже
+                entries: List[Tuple[int, str]] = []
+                header_seen = False
+                for roll_raw, reward_name in rows:
+                    if not header_seen:
+                        if isinstance(roll_raw, str) and roll_raw.lower().startswith("d100"):
+                            header_seen = True
+                        continue
+
+                    if not roll_raw or not reward_name:
+                        continue
+                    try:
+                        roll_num = int(float(str(roll_raw)))
+                    except ValueError:
+                        continue
+                    entries.append((roll_num, reward_name))
+
+                if entries:
+                    entries.sort(key=lambda x: x[0])
+                    reward_tables[lvl] = entries
+
+            return reward_tables
+    except Exception as exc:
+        print(f"Ошибка при чтении {xlsx_path}: {exc}")
+        return {}
+
+
+def refresh_reward_table():
+    """Обновляет глобальную таблицу наград из Excel с откатом к дефолту."""
+    global REWARD_TABLE
+    loaded = load_lootbox_reward_tables_from_excel(LOOTBOX_REWARDS_XLSX)
+    merged: Dict[int, List[Tuple[int, str]]] = {}
+    for lvl in LOOTBOXES:
+        if loaded.get(lvl):
+            merged[lvl] = loaded[lvl]
+        else:
+            merged[lvl] = list(DEFAULT_REWARD_TABLE.get(lvl, []))
+    REWARD_TABLE = merged
+
+    if loaded:
+        print(f"Награды лутбоксов загружены из {LOOTBOX_REWARDS_XLSX}")
+    else:
+        print("Используются встроенные награды лутбоксов")
+
+
 def roll_reward(box_level: int) -> str:
     roll = random.randint(1, 100)
-    for threshold, name in REWARD_TABLE[box_level]:
+    table = REWARD_TABLE.get(box_level) or DEFAULT_REWARD_TABLE.get(box_level, [])
+    for threshold, name in table:
         if roll <= threshold:
             return f"{name} (d100={roll})"
     return f"Сюрприз (d100={roll})"
@@ -844,6 +984,7 @@ async def cb_use(callback: CallbackQuery):
 
 
 async def main():
+    refresh_reward_table()
     init_db()
     print("Bot started")
     await dp.start_polling(bot)
