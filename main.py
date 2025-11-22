@@ -145,20 +145,31 @@ def load_lootboxes_from_excel(path: str = "Лутбоксы.xlsx") -> None:
 
 
 async def init_db() -> None:
+    """
+    Создаём таблицы, а также добавляем недостающие колонки,
+    если в БД уже лежит старая версия схемы.
+    """
+
     def _work():
         conn = get_connection()
         cur = conn.cursor()
+
+        # Базовая схема users (минимальная, чтобы точно существовала)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
                 user_id     BIGINT PRIMARY KEY,
-                username    TEXT,
-                first_name  TEXT,
                 coins       INTEGER NOT NULL DEFAULT 0,
                 created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
             """
         )
+
+        # Миграция: добавляем недостающие колонки, если это старая таблица
+        cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS username   TEXT')
+        cur.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name TEXT')
+
+        # Остальные таблицы — как раньше
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS reward_cards (
@@ -724,7 +735,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(cb_open_card, pattern=r"^open_card:"))
     application.add_handler(CallbackQueryHandler(cb_use_item, pattern=r"^use_item:"))
 
-    # только polling — никакого webhook и Updater
+    # только polling — никаких webhook/Updater
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
