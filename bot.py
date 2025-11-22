@@ -7,19 +7,28 @@ from datetime import datetime, date
 from typing import Dict, List, Tuple
 from xml.etree import ElementTree as ET
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
-from aiogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from dotenv import load_dotenv
+
+try:
+    from aiogram import Bot, Dispatcher, F
+    from aiogram.filters import Command
+    from aiogram.types import (
+        Message,
+        CallbackQuery,
+        InlineKeyboardMarkup,
+        InlineKeyboardButton,
+    )
+    from aiogram.client.default import DefaultBotProperties
+    from aiogram.enums import ParseMode
+except ImportError:
+    # Friendly runtime error if aiogram is not installed.
+    # Install with: pip install aiogram
+    print("Missing dependency 'aiogram'. Install it with: pip install aiogram")
+    raise
 
 # ================== НАСТРОЙКИ ==================
 
+load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "PASTE_YOUR_TOKEN_HERE")
 DB_PATH = "game_bot.db"
 

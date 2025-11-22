@@ -1,0 +1,8 @@
+.env
+.env.*
+game_bot.db
+.venv
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
