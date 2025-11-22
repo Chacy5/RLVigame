@@ -999,6 +999,8 @@ async def cb_use(callback: CallbackQuery):
 async def main():
     refresh_reward_table()
     init_db()
+    # Очистим возможный вебхук, чтобы polling не конфликтовал с другими инстансами.
+    await bot.delete_webhook(drop_pending_updates=True)
     print("Bot started")
     await dp.start_polling(bot)
 
