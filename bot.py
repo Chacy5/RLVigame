@@ -423,6 +423,29 @@ QUEST_DEPENDENCIES = {
 }
 QUEST_CHOICES: Dict[int, Dict[str, Dict]] = {}
 
+# Группы квестов для отображения (по образцу документа)
+LEVEL_GROUPS = {
+    2: [
+        ("Хвосты", ["2.1"]),
+        ("Долг 500$", ["2.2"]),
+        ("Upwork", ["2.3", "2.4", "2.5"]),
+        ("Финансы", ["2.6", "2.7"]),
+        ("Ремонт", ["2.8"]),
+    ],
+}
+
+# Расписание стартов уровней (блокирует до даты + до завершения прошлых уровней)
+LEVEL_SCHEDULE = {
+    0: {"start": date(2025, 11, 20), "end": date(2025, 11, 25)},
+    1: {"start": date(2025, 11, 20), "end": date(2025, 12, 12)},
+    2: {"start": date(2025, 12, 12), "end": date(2026, 1, 7)},
+    3: {"start": date(2026, 1, 7), "end": date(2026, 2, 20)},
+    4: {"start": date(2026, 2, 20), "end": date(2026, 3, 20)},
+    5: {"start": date(2026, 3, 20), "end": date(2026, 4, 20)},
+    6: {"start": date(2026, 4, 20), "end": date(2026, 5, 5)},
+    7: {"start": date(2026, 5, 5), "end": date(2026, 5, 31)},
+}
+
 
 def _excel_col_to_index(col: str) -> int:
     """Преобразует буквенный адрес столбца (A, B, AA...) в индекс с нуля."""
@@ -683,6 +706,25 @@ def _quest_by_code(code: str) -> Dict | None:
     return next((q for q in MAIN_QUESTS if q.get("code") == code), None)
 
 
+def _prev_levels_done(uid: int, lvl: int) -> bool:
+    for q in MAIN_QUESTS:
+        if _quest_level(q) < lvl and get_main_status(uid, q["index"]) != "done":
+            return False
+    return True
+
+
+def _is_level_open(uid: int, lvl: int, today: date | None = None) -> bool:
+    today = today or date.today()
+    schedule = LEVEL_SCHEDULE.get(lvl)
+    if schedule:
+        start = schedule.get("start")
+        if start and today < start:
+            return False
+    if not _prev_levels_done(uid, lvl):
+        return False
+    return True
+
+
 def _quest_dependency_met(uid: int, quest: Dict) -> bool:
     code = quest.get("code")
     if not code:
@@ -697,8 +739,12 @@ def _quest_dependency_met(uid: int, quest: Dict) -> bool:
 
 
 def _ensure_unlocks(uid: int):
-    """Активирует все квесты, у которых выполнены зависимости (или их нет)."""
+    """Активирует все квесты, у которых выполнены зависимости и уровень открыт."""
+    today = date.today()
     for q in MAIN_QUESTS:
+        lvl = _quest_level(q)
+        if not _is_level_open(uid, lvl, today=today):
+            continue
         status = get_main_status(uid, q["index"])
         if status == "locked" and _quest_dependency_met(uid, q):
             set_main_status(uid, q["index"], "active")
@@ -889,7 +935,13 @@ async def cb_menu(callback: CallbackQuery):
         lines = ["📍 <b>Квест-карта</b>\n"]
         for lvl in sorted(levels):
             quests = levels[lvl]
-            statuses = [get_main_status(uid, q["index"]) for q in quests]
+            statuses = []
+            level_open = _is_level_open(uid, lvl)
+            for q in quests:
+                st = get_main_status(uid, q["index"])
+                if not level_open:
+                    st = "locked"
+                statuses.append(st)
             if all(s == "done" for s in statuses):
                 mark = "✅"
             elif any(s == "active" for s in statuses):
@@ -1198,6 +1250,12 @@ async def cb_level(callback: CallbackQuery):
     except ValueError:
         await callback.answer("Уровень не найден", show_alert=True)
         return
+    if not _is_level_open(uid, lvl):
+        schedule = LEVEL_SCHEDULE.get(lvl, {})
+        start = schedule.get("start")
+        start_txt = f"Уровень откроется {start.isoformat()}" if start else "Уровень пока закрыт"
+        await callback.answer(start_txt, show_alert=True)
+        return
 
     quests = [q for q in MAIN_QUESTS if _quest_level(q) == lvl]
     if not quests:
@@ -1222,7 +1280,10 @@ async def cb_level(callback: CallbackQuery):
         lines.append("\n".join(final_line))
     lines.append("")
     kb = []
-    for q in quests:
+    groups = LEVEL_GROUPS.get(lvl)
+    listed_ids = set()
+
+    def add_q(q):
         status = get_main_status(uid, q["index"])
         if status != "done" and not _quest_dependency_met(uid, q):
             status = "locked"
@@ -1241,6 +1302,20 @@ async def cb_level(callback: CallbackQuery):
                 )
             ]
         )
+        listed_ids.add(q["index"])
+
+    if groups:
+        for name, codes in groups:
+            lines.append(f"<b>{name}</b>")
+            for code in codes:
+                q = _quest_by_code(code)
+                if q:
+                    add_q(q)
+            lines.append("")
+    # Остальные квесты, если есть
+    for q in quests:
+        if q["index"] not in listed_ids:
+            add_q(q)
 
     kb.append([InlineKeyboardButton(text="⬅ К карте", callback_data="menu:map")])
     await callback.message.edit_text(
