@@ -407,12 +407,12 @@ LEVEL_LABELS = {
 LEVEL_META = {
     0: {"dates": "20–25 ноября 2025", "final_coins": 0, "final_cards": []},
     1: {"dates": "20 ноября — 12 декабря 2025", "final_coins": 5, "final_cards": ["uncommon"]},
-    2: {"dates": "12 декабря 2025 — 7 января 2025", "final_coins": 5, "final_cards": ["rare"]},
-    3: {"dates": "7 января — 20 февраля 2025", "final_coins": 5, "final_cards": ["epic"]},
-    4: {"dates": "20 февраля — 20 марта 2025", "final_coins": 10, "final_cards": ["legendary"]},
-    5: {"dates": "20 марта — 20 апреля 2025", "final_coins": 15, "final_cards": ["epic", "legendary"]},
-    6: {"dates": "20 апреля — 5 мая 2025", "final_coins": 10, "final_cards": ["legendary"]},
-    7: {"dates": "5–31 мая 2025", "final_coins": 20, "final_cards": ["legendary"]},
+    2: {"dates": "12 декабря 2025 — 7 января 2026", "final_coins": 5, "final_cards": ["rare"]},
+    3: {"dates": "7 января — 20 февраля 2026", "final_coins": 5, "final_cards": ["epic"]},
+    4: {"dates": "20 февраля — 20 марта 2026", "final_coins": 10, "final_cards": ["legendary"]},
+    5: {"dates": "20 марта — 20 апреля 2026", "final_coins": 15, "final_cards": ["epic", "legendary"]},
+    6: {"dates": "20 апреля — 5 мая 2026", "final_coins": 10, "final_cards": ["legendary"]},
+    7: {"dates": "5–31 мая 2026", "final_coins": 20, "final_cards": ["legendary"]},
 }
 
 # Зависимости квестов (код -> требуется выполнение кода)
