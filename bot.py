@@ -395,6 +395,25 @@ LEVEL_LABELS = {
     7: "🚉 УРОВЕНЬ 7 — НАКОПЛЕНИЕ НА ТБИЛИСИ + ПЕРЕЕЗД",
 }
 
+# Метаданные уровней: даты и финальные награды
+LEVEL_META = {
+    0: {"dates": "20–25 ноября 2024", "final_coins": 0, "final_cards": []},
+    1: {"dates": "20 ноября — 12 декабря 2024", "final_coins": 5, "final_cards": ["uncommon"]},
+    2: {"dates": "12 декабря 2024 — 7 января 2025", "final_coins": 5, "final_cards": ["rare"]},
+    3: {"dates": "7 января — 20 февраля 2025", "final_coins": 5, "final_cards": ["epic"]},
+    4: {"dates": "20 февраля — 20 марта 2025", "final_coins": 10, "final_cards": ["legendary"]},
+    5: {"dates": "20 марта — 20 апреля 2025", "final_coins": 15, "final_cards": ["epic", "legendary"]},
+    6: {"dates": "20 апреля — 5 мая 2025", "final_coins": 10, "final_cards": ["legendary"]},
+    7: {"dates": "5–31 мая 2025", "final_coins": 20, "final_cards": ["legendary"]},
+}
+
+# Зависимости квестов (код -> требуется выполнение кода)
+QUEST_DEPENDENCIES = {
+    "2.4": "2.3",
+    "2.5": "2.4",
+    "2.7": "2.6",
+}
+
 
 def _excel_col_to_index(col: str) -> int:
     """Преобразует буквенный адрес столбца (A, B, AA...) в индекс с нуля."""
@@ -651,6 +670,55 @@ def _quest_level(q: Dict) -> int:
     return 0
 
 
+def _quest_by_code(code: str) -> Dict | None:
+    return next((q for q in MAIN_QUESTS if q.get("code") == code), None)
+
+
+def _quest_dependency_met(uid: int, quest: Dict) -> bool:
+    code = quest.get("code")
+    if not code:
+        return True
+    dep = QUEST_DEPENDENCIES.get(code)
+    if not dep:
+        return True
+    prev = _quest_by_code(dep)
+    if not prev:
+        return True
+    return get_main_status(uid, prev["index"]) == "done"
+
+
+def _ensure_unlocks(uid: int):
+    """Активирует все квесты, у которых выполнены зависимости (или их нет)."""
+    for q in MAIN_QUESTS:
+        status = get_main_status(uid, q["index"])
+        if status == "locked" and _quest_dependency_met(uid, q):
+            set_main_status(uid, q["index"], "active")
+
+
+def _grant_level_final(uid: int, lvl: int):
+    meta = LEVEL_META.get(lvl)
+    if not meta:
+        return
+    quests = [q for q in MAIN_QUESTS if _quest_level(q) == lvl]
+    if not quests:
+        return
+    if not all(get_main_status(uid, q["index"]) == "done" for q in quests):
+        return
+
+    # Проверим, выдавали ли финал ранее (по записи в rewards)
+    final_marker = f"ФИНАЛ {lvl}"
+    existing = [r for r in get_active_rewards(uid) if final_marker in r[1]]
+    if existing:
+        return
+
+    coins = meta.get("final_coins", 0)
+    if coins:
+        update_coins(uid, coins)
+    for rarity in meta.get("final_cards", []):
+        card_cfg = REWARD_CARDS.get(rarity, REWARD_CARDS["common"])
+        add_reward(uid, f"{final_marker}: {card_cfg['label']}", 0)
+
+
 def refresh_tasks_from_docx():
     """Обновляет MAIN_QUESTS и DAILY_TASKS из docx, иначе оставляет дефолты."""
     global MAIN_QUESTS, DAILY_TASKS
@@ -791,6 +859,7 @@ async def cb_menu(callback: CallbackQuery):
 
     # КВЕСТ-КАРТА
     if section == "map":
+        _ensure_unlocks(uid)
         levels = {}
         for q in MAIN_QUESTS:
             lvl = _quest_level(q)
@@ -808,7 +877,9 @@ async def cb_menu(callback: CallbackQuery):
             else:
                 mark = "🔒"
             title = LEVEL_LABELS.get(lvl, f"Уровень {lvl}")
-            lines.append(f"{mark} {title}")
+            date_range = LEVEL_META.get(lvl, {}).get("dates", "")
+            date_label = f" ({date_range})" if date_range else ""
+            lines.append(f"{mark} {title}{date_label}")
             kb.append(
                 [
                     InlineKeyboardButton(
@@ -950,6 +1021,10 @@ async def cb_open_quest(callback: CallbackQuery):
         await callback.answer("Квест не найден", show_alert=True)
         return
 
+    if not _quest_dependency_met(uid, quest):
+        await callback.answer("Сначала заверши предыдущий квест в категории", show_alert=True)
+        return
+
     status = get_main_status(uid, idx)
     if status == "locked":
         await callback.answer("Этот квест ещё закрыт 🔒", show_alert=True)
@@ -1002,9 +1077,13 @@ async def cb_quest_done(callback: CallbackQuery):
     set_main_status(uid, idx, "done")
 
     # разлочим следующий
-    next_q = next((q for q in MAIN_QUESTS if q["index"] == idx + 1), None)
-    if next_q and get_main_status(uid, next_q["index"]) == "locked":
-        set_main_status(uid, next_q["index"], "active")
+    # квесты, зависящие от этого кода
+    for code, dep in QUEST_DEPENDENCIES.items():
+        if dep == quest.get("code"):
+            nxt = _quest_by_code(code)
+            if nxt and get_main_status(uid, nxt["index"]) == "locked":
+                set_main_status(uid, nxt["index"], "active")
+    _ensure_unlocks(uid)
 
     # награда монетами
     coins_reward = quest["reward_coins"]
@@ -1020,6 +1099,8 @@ async def cb_quest_done(callback: CallbackQuery):
 
     # анимация открытия карты
     await show_card_animation(callback.message, card_cfg["label"])
+
+    _grant_level_final(uid, _quest_level(quest))
 
     text = (
         f"🎉 <b>Квест {quest.get('code', idx)} выполнен!</b>\n\n"
@@ -1051,10 +1132,28 @@ async def cb_level(callback: CallbackQuery):
         await callback.answer("Нет квестов для уровня", show_alert=True)
         return
 
-    lines = [LEVEL_LABELS.get(lvl, f"Уровень {lvl}"), ""]
+    meta = LEVEL_META.get(lvl, {})
+    date_range = meta.get("dates", "")
+    lines = [LEVEL_LABELS.get(lvl, f"Уровень {lvl}")]
+    if date_range:
+        lines.append(f"⏳ {date_range}")
+    final_line = []
+    if meta.get("final_coins") or meta.get("final_cards"):
+        rewards_txt = []
+        coins = meta.get("final_coins", 0)
+        if coins:
+            rewards_txt.append(f"+{coins} coin")
+        for r in meta.get("final_cards", []):
+            rewards_txt.append(REWARD_CARDS.get(r, REWARD_CARDS['common'])['label'])
+        final_line.append("🎯 Финал: " + " + ".join(rewards_txt))
+    if final_line:
+        lines.append("\n".join(final_line))
+    lines.append("")
     kb = []
     for q in quests:
         status = get_main_status(uid, q["index"])
+        if status != "done" and not _quest_dependency_met(uid, q):
+            status = "locked"
         if status == "done":
             mark = "✅"
         elif status == "active":
