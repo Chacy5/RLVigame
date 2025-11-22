@@ -1,10 +1,12 @@
 import asyncio
+import itertools
+import json
 import os
 import random
 import sqlite3
 import zipfile
 from datetime import datetime, date
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 from xml.etree import ElementTree as ET
 
 from dotenv import load_dotenv
@@ -20,6 +22,8 @@ try:
         CallbackQuery,
         InlineKeyboardMarkup,
         InlineKeyboardButton,
+        ReplyKeyboardMarkup,
+        KeyboardButton,
     )
     from aiogram.client.default import DefaultBotProperties
     from aiogram.enums import ParseMode
@@ -38,6 +42,134 @@ DB_PATH = "game_bot.db"
 # Если хочешь сделать бота приватным — впиши сюда свой Telegram ID
 # Узнать можно у @userinfobot
 ALLOWED_USER_IDS = set()  # напр. {123456789}
+
+
+# ================== САНИТИЗАЦИЯ СИМВОЛОВ ==================
+
+EMOJI_POOL = [
+    "☽",
+    "𓀩",
+    "𓀿",
+    "𓂀",
+    "☸",
+    "𖥘",
+    "𓁹",
+    "𓊀",
+    "𓊖",
+    "𓊗",
+    "𓅓",
+    "𓃭",
+    "𓃰",
+    "𓆣",
+    "𓆤",
+    "𓆱",
+    "𓉐",
+    "𓏏",
+    "✦",
+    "✺",
+    "⟡",
+    "✷",
+    "❂",
+    "✶",
+    "✧",
+    "❉",
+    "✵",
+    "✢",
+    "✥",
+    "✹",
+    "✱",
+    "✫",
+    "✲",
+    "⚚",
+    "⚘",
+    "✦",
+    "✷",
+    "❂",
+    "✧",
+    "✢",
+]
+EMOJI_PATTERN = re.compile(
+    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F3FB-\U0001F3FF]+"
+)
+
+
+def clean_text_symbols(text: str) -> str:
+    if not isinstance(text, str):
+        return text
+    cycle = itertools.cycle(EMOJI_POOL)
+    return EMOJI_PATTERN.sub(lambda _m: next(cycle), text)
+
+
+def clean_markup(markup):
+    if markup is None:
+        return None
+    if isinstance(markup, InlineKeyboardMarkup):
+        rows = []
+        for row in markup.inline_keyboard:
+            new_row = []
+            for btn in row:
+                data = btn.model_dump(exclude_none=True)
+                data["text"] = clean_text_symbols(data.get("text", ""))
+                new_row.append(InlineKeyboardButton(**data))
+            rows.append(new_row)
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+    if isinstance(markup, ReplyKeyboardMarkup):
+        rows = []
+        for row in markup.keyboard:
+            new_row = []
+            for btn in row:
+                data = btn.model_dump(exclude_none=True)
+                data["text"] = clean_text_symbols(data.get("text", ""))
+                new_row.append(KeyboardButton(**data))
+            rows.append(new_row)
+        return ReplyKeyboardMarkup(
+            keyboard=rows,
+            resize_keyboard=markup.resize_keyboard,
+            one_time_keyboard=markup.one_time_keyboard,
+            input_field_placeholder=markup.input_field_placeholder,
+            selective=markup.selective,
+            persistent=getattr(markup, "is_persistent", None),
+        )
+    return markup
+
+
+def patch_aiogram_rendering():
+    """Меняет ответные методы, чтобы чистить эмодзи перед отправкой."""
+    from aiogram.types import Message
+    from aiogram import Bot as AiogramBot
+
+    if getattr(Message, "_clean_patched", False):
+        return
+
+    orig_answer = Message.answer
+    orig_edit = Message.edit_text
+
+    async def patched_answer(self, text, **kwargs):
+        kwargs["reply_markup"] = clean_markup(kwargs.get("reply_markup"))
+        return await orig_answer(self, clean_text_symbols(text), **kwargs)
+
+    async def patched_edit(self, text, **kwargs):
+        kwargs["reply_markup"] = clean_markup(kwargs.get("reply_markup"))
+        return await orig_edit(self, clean_text_symbols(text), **kwargs)
+
+    Message.answer = patched_answer  # type: ignore
+    Message.edit_text = patched_edit  # type: ignore
+    Message._clean_patched = True  # type: ignore
+
+    orig_send = AiogramBot.send_message
+    orig_edit_bot = AiogramBot.edit_message_text
+
+    async def patched_send(self, chat_id, text, **kwargs):
+        kwargs["reply_markup"] = clean_markup(kwargs.get("reply_markup"))
+        return await orig_send(self, chat_id, clean_text_symbols(text), **kwargs)
+
+    async def patched_edit_bot(self, text, **kwargs):
+        kwargs["reply_markup"] = clean_markup(kwargs.get("reply_markup"))
+        return await orig_edit_bot(self, clean_text_symbols(text), **kwargs)
+
+    AiogramBot.send_message = patched_send  # type: ignore
+    AiogramBot.edit_message_text = patched_edit_bot  # type: ignore
+
 
 
 # ================== БАЗА ДАННЫХ ==================
@@ -301,6 +433,62 @@ RARITY_TO_BOX_LEVEL = {
     "epic": 4,
     "legendary": 5,
 }
+
+SHOP_REWARDS_FILE = os.getenv("SHOP_REWARDS_FILE", "data/shop_rewards.json")
+DEFAULT_SHOP_REWARDS: List[Dict] = [
+    {
+        "id": "coffee_break",
+        "emoji": "☕",
+        "name": "Кофе и 30 минут покоя",
+        "category": "selfcare",
+        "price": 10,
+        "description": "Любимый напиток и полчаса без гаджетов.",
+    },
+    {
+        "id": "mini_gift",
+        "emoji": "🎁",
+        "name": "Маленький подарок себе",
+        "category": "fun",
+        "price": 20,
+        "description": "Стикеры, свечка или другая милость «просто так».",
+    },
+    {
+        "id": "home_flowers",
+        "emoji": "🌿",
+        "name": "Цветы или растение для дома",
+        "category": "home",
+        "price": 25,
+        "description": "Небольшой букет или новое зелёное растение.",
+    },
+    {
+        "id": "game_skin",
+        "emoji": "🎮",
+        "name": "Маленький скин/игрушка",
+        "category": "games",
+        "price": 30,
+        "description": "То, что давно хотелось купить в игре.",
+    },
+    {
+        "id": "nice_dinner",
+        "emoji": "🍣",
+        "name": "Ужин с вкусняшкой",
+        "category": "food",
+        "price": 40,
+        "description": "Пицца, роллы или другой приятный ужин.",
+    },
+    {
+        "id": "big_treat",
+        "emoji": "✨",
+        "name": "Большая радость за прогресс",
+        "category": "big",
+        "price": 80,
+        "description": "Более крупная покупка, когда закрыт важный этап.",
+    },
+]
+SHOP_REWARDS: List[Dict] = []
+SHOP_PRICE_PRESETS = [10, 20, 30, 40, 50, 75, 100, 150, 200, 300, 500]
+SHOP_FILTERS: Dict[int, Dict] = defaultdict(lambda: {"category": "all", "price": "all"})
+SHOP_PAGE_SIZE = 8
 
 # Основные квесты — под твой реальный план
 MAIN_QUESTS = [
@@ -1479,6 +1667,137 @@ def refresh_tasks_from_docx():
     DAILY_TASKS = build_daily_tasks_from_raw()
     print(f"Дейлики загружены из RAW: {len(DAILY_TASKS)} шт.")
 
+
+# ================== МАГАЗИН НАГРАД ==================
+
+
+def _normalize_shop_reward(raw: Dict, idx: int) -> Optional[Dict]:
+    try:
+        price = int(raw.get("price", 0))
+    except (TypeError, ValueError):
+        return None
+    price = max(price, 0)
+    reward_id = str(raw.get("id") or idx + 1).replace(":", "_")
+    name = str(raw.get("name") or f"Награда {idx + 1}")
+    category = str(raw.get("category") or "other")
+    return {
+        "id": reward_id,
+        "name": name,
+        "emoji": raw.get("emoji", ""),
+        "category": category,
+        "price": price,
+        "description": str(raw.get("description") or ""),
+    }
+
+
+def load_shop_rewards(path: str) -> List[Dict]:
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        print(f"Не удалось прочитать награды магазина из {path}: {exc}")
+        return []
+
+    if not isinstance(data, list):
+        print(f"Файл {path} должен содержать список наград")
+        return []
+
+    normalized: List[Dict] = []
+    for idx, raw in enumerate(data):
+        if not isinstance(raw, dict):
+            continue
+        norm = _normalize_shop_reward(raw, idx)
+        if norm:
+            normalized.append(norm)
+    return normalized
+
+
+def refresh_shop_rewards():
+    """Загружает награды магазина из файла или использует дефолтный набор."""
+    global SHOP_REWARDS
+    path = SHOP_REWARDS_FILE
+    loaded = load_shop_rewards(path)
+    if loaded:
+        SHOP_REWARDS = loaded
+        print(f"Награды магазина загружены из {path}: {len(SHOP_REWARDS)} шт.")
+    else:
+        SHOP_REWARDS = list(DEFAULT_SHOP_REWARDS)
+        print("Используются дефолтные награды магазина")
+
+
+def get_shop_filters(uid: int) -> Dict:
+    return SHOP_FILTERS.setdefault(uid, {"category": "all", "price": "all"})
+
+
+def reset_shop_filters(uid: int):
+    SHOP_FILTERS[uid] = {"category": "all", "price": "all"}
+
+
+def shop_price_options() -> List[int]:
+    prices = sorted(
+        {int(r.get("price", 0)) for r in SHOP_REWARDS if isinstance(r.get("price"), (int, float))}
+    )
+    if not prices:
+        return []
+    options = [p for p in SHOP_PRICE_PRESETS if prices[0] <= p <= prices[-1]]
+    if not options:
+        options = prices[:6]
+    return options[:6]
+
+
+def shop_price_label(uid: int) -> str:
+    filters = get_shop_filters(uid)
+    pf = filters.get("price", "all")
+    if pf == "all":
+        return "все цены"
+    if pf == "balance":
+        return "по балансу"
+    if isinstance(pf, str) and pf.startswith("max:"):
+        try:
+            val = int(pf.split(":", 1)[1])
+            return f"до {val}"
+        except ValueError:
+            return "все цены"
+    return "все цены"
+
+
+def filtered_shop_rewards(uid: int) -> List[Dict]:
+    filters = get_shop_filters(uid)
+    category = filters.get("category", "all")
+    price_filter = filters.get("price", "all")
+    items = list(SHOP_REWARDS) if SHOP_REWARDS else list(DEFAULT_SHOP_REWARDS)
+    if category != "all":
+        items = [i for i in items if i.get("category") == category]
+
+    max_price: Optional[int] = None
+    if price_filter == "balance":
+        max_price = get_coins(uid)
+    elif isinstance(price_filter, str) and price_filter.startswith("max:"):
+        try:
+            max_price = int(price_filter.split(":", 1)[1])
+        except ValueError:
+            max_price = None
+    if max_price is not None:
+        items = [i for i in items if i.get("price", 0) <= max_price]
+
+    items.sort(key=lambda i: (i.get("price", 0), i.get("name", "")))
+    return items
+
+
+def shop_categories() -> List[str]:
+    items = SHOP_REWARDS if SHOP_REWARDS else DEFAULT_SHOP_REWARDS
+    return sorted({i.get("category", "other") for i in items})
+
+
+def get_shop_reward(item_id: str) -> Optional[Dict]:
+    for item in SHOP_REWARDS if SHOP_REWARDS else DEFAULT_SHOP_REWARDS:
+        if str(item.get("id")) == str(item_id):
+            return item
+    return None
+
+
 # ================== ВСПОМОГАТЕЛЬНЫЕ ОТРИСОВКИ ==================
 
 
@@ -1490,7 +1809,7 @@ def build_map_view(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
         levels.setdefault(lvl, []).append(q)
 
     kb = []
-    lines = ["📍 <b>Квест-карта</b>\n"]
+    lines = ["📍 <b>Карта</b>\n"]
     for lvl in sorted(levels):
         quests = levels[lvl]
         statuses = []
@@ -1526,11 +1845,7 @@ def build_map_view(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
 def build_profile_view(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
     coins = get_coins(uid)
     progress = level_progress(uid)
-    text = (
-        f"💰 Монет: <b>{coins}</b>\n"
-        f"🏃 Прогресс: {progress}\n\n"
-        "Сбросит игру: удалит монеты, награды и прогресс квестов."
-    )
+    text = f"💰 Монет: <b>{coins}</b>\n🏃 {progress}\n\nСброс удаляет монеты, награды и прогресс."
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Сбросить игру", callback_data="reset:ask")],
@@ -1556,7 +1871,7 @@ def build_dailies_view(
         if filter_coin != "all":
             line += f" · {filter_coin} мон"
         if search_term:
-            line += f" · поиск «{search_term}»"
+            line += f" · «{search_term}»"
         lines.append(line)
 
     tasks_list = list(DAILY_TASKS.items())
@@ -1580,7 +1895,7 @@ def build_dailies_view(
     end = start + page_size
     page_tasks = tasks_list[start:end]
     if total > page_size:
-        lines.append(f"Страница {page+1}/{total_pages}")
+        lines.append(f"{page+1}/{total_pages}")
 
     kb = [
         [
@@ -1633,6 +1948,142 @@ def build_dailies_view(
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
 
 
+def _shop_icon(item: Dict) -> str:
+    return item.get("emoji") or "🏷️"
+
+
+def shop_category_label(cat: str) -> str:
+    if cat == "all":
+        return "Все категории"
+    return THEME_LABELS.get(cat, cat)
+
+
+def build_shop_view(uid: int, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
+    filters = get_shop_filters(uid)
+    items = filtered_shop_rewards(uid)
+    total = len(items)
+    total_pages = max(1, (total + SHOP_PAGE_SIZE - 1) // SHOP_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    start = page * SHOP_PAGE_SIZE
+    end = start + SHOP_PAGE_SIZE
+    page_items = items[start:end]
+
+    cat_label = shop_category_label(filters.get("category", "all"))
+    price_label = shop_price_label(uid)
+    coins = get_coins(uid)
+
+    lines = [
+        "🏪 <b>Магазин</b>",
+        f"Монет: <b>{coins}</b>",
+        f"{cat_label} · {price_label}",
+        "",
+    ]
+    if page_items:
+        if total_pages > 1:
+            lines.append(f"Страница {page + 1}/{total_pages}")
+        for item in page_items:
+            icon = _shop_icon(item)
+            lines.append(f"{icon} {item.get('name')} — {item.get('price')} мон")
+    else:
+        lines.append("По этим фильтрам ничего не нашлось.")
+
+    kb = [
+        [
+            InlineKeyboardButton(text=f"Категория: {cat_label[:14]}", callback_data="shop:catmenu"),
+            InlineKeyboardButton(text=f"Цена: {price_label}", callback_data="shop:pricemenu"),
+        ],
+        [InlineKeyboardButton(text="♻️ Сбросить фильтры", callback_data="shop:reset")],
+    ]
+    for item in page_items:
+        kb.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🛒 {item.get('name')[:22]} — {item.get('price')}",
+                    callback_data=f"shop:item:{item.get('id')}",
+                )
+            ]
+        )
+
+    nav_row = []
+    if total_pages > 1 and page > 0:
+        nav_row.append(
+            InlineKeyboardButton(text="⬅️", callback_data=f"shop:list:{page-1}")
+        )
+    if total_pages > 1 and page < total_pages - 1:
+        nav_row.append(
+            InlineKeyboardButton(text="➡️", callback_data=f"shop:list:{page+1}")
+        )
+    if nav_row:
+        kb.append(nav_row)
+
+    kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_shop_categories_kb(uid: int) -> InlineKeyboardMarkup:
+    filters = get_shop_filters(uid)
+    current = filters.get("category", "all")
+    kb = []
+    kb.append(
+        [
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current == 'all' else ''}Все категории",
+                callback_data="shop:cat:all",
+            )
+        ]
+    )
+    cats = shop_categories()
+    row = []
+    for cat in cats:
+        mark = "✓ " if cat == current else ""
+        row.append(
+            InlineKeyboardButton(
+                text=f"{mark}{shop_category_label(cat)}", callback_data=f"shop:cat:{cat}"
+            )
+        )
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+    kb.append([InlineKeyboardButton(text="⬅ Назад", callback_data="menu:shop")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_shop_price_kb(uid: int) -> InlineKeyboardMarkup:
+    filters = get_shop_filters(uid)
+    current = filters.get("price", "all")
+    kb = [
+        [
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current == 'all' else ''}Все цены", callback_data="shop:price:all"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"{'✓ ' if current == 'balance' else ''}По балансу",
+                callback_data="shop:price:balance",
+            )
+        ],
+    ]
+    opts = shop_price_options()
+    row = []
+    for opt in opts:
+        mark = "✓ " if current == f"max:{opt}" else ""
+        row.append(
+            InlineKeyboardButton(
+                text=f"{mark}До {opt}", callback_data=f"shop:price:max:{opt}"
+            )
+        )
+        if len(row) == 2:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+    kb.append([InlineKeyboardButton(text="⬅ Назад", callback_data="menu:shop")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
 def roll_reward(box_level: int) -> str:
     return roll_single_reward(box_level)
 
@@ -1672,6 +2123,7 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML),
 )
 dp = Dispatcher()
+patch_aiogram_rendering()
 
 
 def main_menu_kb() -> InlineKeyboardMarkup:
@@ -1679,6 +2131,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📍 Квест-карта", callback_data="menu:map")],
         [InlineKeyboardButton(text="📝 Дейлики", callback_data="menu:dailies")],
         [InlineKeyboardButton(text="🎁 Лутбоксы", callback_data="menu:loot")],
+        [InlineKeyboardButton(text="🏪 Магазин", callback_data="menu:shop")],
         [InlineKeyboardButton(text="📦 Инвентарь", callback_data="menu:inv")],
         [InlineKeyboardButton(text="💰 Профиль", callback_data="menu:profile")],
     ]
@@ -1690,20 +2143,21 @@ def reply_menu_kb():
 
     return ReplyKeyboardMarkup(
         keyboard=[
-            [
-                KeyboardButton(text="📍 Квест-карта"),
-                KeyboardButton(text="📝 Дейлики"),
-            ],
-            [
-                KeyboardButton(text="🎁 Лутбоксы"),
-                KeyboardButton(text="📦 Инвентарь"),
-            ],
-            [
-                KeyboardButton(text="💰 Профиль"),
-            ],
+        [
+            KeyboardButton(text="📍 Квест-карта"),
+            KeyboardButton(text="📝 Дейлики"),
         ],
-        resize_keyboard=True,
-    )
+        [
+            KeyboardButton(text="🎁 Лутбоксы"),
+            KeyboardButton(text="🏪 Магазин"),
+        ],
+        [
+            KeyboardButton(text="📦 Инвентарь"),
+            KeyboardButton(text="💰 Профиль"),
+        ],
+    ],
+    resize_keyboard=True,
+)
 
 
 def access_denied(user_id: int) -> bool:
@@ -1757,12 +2211,9 @@ async def cmd_start(message: Message):
         set_main_status(message.from_user.id, 1, "active")
 
     text = (
-        "🌈 <b>Твоя дофаминовая игра запущена!</b>\n\n"
-        "• Делай реальные квесты и дейлики\n"
-        "• Получай монеты\n"
-        "• Открывай лутбоксы и копи карты-награды\n\n"
-        f"Сейчас у тебя <b>{coins}</b> монет.\n\n"
-        "Открыть главное меню: /menu"
+        "🌈 <b>Игра запущена!</b>\n"
+        "Квесты, дейлики и награды ждут.\n"
+        f"Монет сейчас: <b>{coins}</b>.\n/menu"
     )
     await message.answer(text, reply_markup=reply_menu_kb())
 
@@ -1775,12 +2226,16 @@ async def cmd_menu(message: Message):
 
     coins = get_coins(message.from_user.id)
     await message.answer(
-        f"🏠 <b>Главное меню</b>\nМонет: <b>{coins}</b>",
+        f"🏠 <b>Меню</b>\nМонет: <b>{coins}</b>",
         reply_markup=reply_menu_kb(),
     )
 
 
-@dp.message(F.text.in_({"📍 Квест-карта", "📝 Дейлики", "🎁 Лутбоксы", "📦 Инвентарь", "💰 Профиль"}))
+@dp.message(
+    F.text.in_(
+        {"📍 Квест-карта", "📝 Дейлики", "🎁 Лутбоксы", "🏪 Магазин", "📦 Инвентарь", "💰 Профиль"}
+    )
+)
 async def on_menu_buttons(message: Message):
     if access_denied(message.from_user.id):
         await message.answer("Этот бот приватный 🌙")
@@ -1795,12 +2250,10 @@ async def on_menu_buttons(message: Message):
     elif text == "🎁 Лутбоксы":
         uid = message.from_user.id
         coins = get_coins(uid)
-        text = "🎁 <b>Лутбоксы</b>\n\n"
+        text = "🎁 <b>Лутбоксы</b>\n"
         for lvl, box in LOOTBOXES.items():
             text += f"{lvl}. {box['name']} — <b>{box['price']}</b> монет\n"
-        text += (
-            f"\nУ тебя сейчас <b>{coins}</b> монет.\nВыбери лутбокс, чтобы купить и открыть."
-        )
+        text += f"\nМонет: <b>{coins}</b>"
         kb = []
         for lvl, box in LOOTBOXES.items():
             kb.append(
@@ -1813,14 +2266,16 @@ async def on_menu_buttons(message: Message):
             )
         kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
         await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    elif text == "🏪 Магазин":
+        view_text, kb = build_shop_view(message.from_user.id)
+        await message.answer(view_text, reply_markup=kb)
     elif text == "📦 Инвентарь":
         uid = message.from_user.id
         rewards = get_active_rewards(uid)
         if not rewards:
             text = (
-                "📦 Твой инвентарь пока пуст.\n\n"
-                "Заработай монеты за квесты или дейлики и открой лутбокс 🎁\n"
-                "Или получи карту-награду за Мейн-квест."
+                "📦 Инвентарь пуст.\n"
+                "Заработай монеты или открой лутбокс 🎁."
             )
             kb = [
                 [
@@ -1834,7 +2289,12 @@ async def on_menu_buttons(message: Message):
             lines = ["📦 <b>Инвентарь</b>\n"]
             kb = []
             for rid, name, lvl in rewards:
-                prefix = "🃏" if lvl == 0 else f"[L{lvl}]"
+                if lvl == 0:
+                    prefix = "🃏"
+                elif lvl < 0:
+                    prefix = "🛍️"
+                else:
+                    prefix = f"[L{lvl}]"
                 lines.append(f"• {prefix} {name}")
                 kb.append(
                     [
@@ -1882,12 +2342,10 @@ async def cb_menu(callback: CallbackQuery):
     # ЛУТБОКСЫ
     elif section == "loot":
         coins = get_coins(uid)
-        text = "🎁 <b>Лутбоксы</b>\n\n"
+        text = "🎁 <b>Лутбоксы</b>\n"
         for lvl, box in LOOTBOXES.items():
             text += f"{lvl}. {box['name']} — <b>{box['price']}</b> монет\n"
-        text += (
-            f"\nУ тебя сейчас <b>{coins}</b> монет.\nВыбери лутбокс, чтобы купить и открыть."
-        )
+        text += f"\nМонет: <b>{coins}</b>"
 
         kb = []
         for lvl, box in LOOTBOXES.items():
@@ -1906,14 +2364,18 @@ async def cb_menu(callback: CallbackQuery):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
         )
 
+    # МАГАЗИН НАГРАД
+    elif section == "shop":
+        text, kb = build_shop_view(uid)
+        await callback.message.edit_text(text, reply_markup=kb)
+
     # ИНВЕНТАРЬ
     elif section == "inv":
         rewards = get_active_rewards(uid)
         if not rewards:
             text = (
-                "📦 Твой инвентарь пока пуст.\n\n"
-                "Заработай монеты за квесты или дейлики и открой лутбокс 🎁\n"
-                "Или получи карту-награду за Мейн-квест."
+                "📦 Инвентарь пуст.\n"
+                "Заработай монеты или открой лутбокс 🎁."
             )
             kb = [
                 [
@@ -1929,6 +2391,8 @@ async def cb_menu(callback: CallbackQuery):
             for rid, name, lvl in rewards:
                 if lvl == 0:
                     prefix = "🃏"
+                elif lvl < 0:
+                    prefix = "🛍️"
                 else:
                     prefix = f"[L{lvl}]"
                 lines.append(f"• {prefix} {name}")
@@ -2288,28 +2752,8 @@ async def cb_daily(callback: CallbackQuery):
         update_coins(uid, -coins)
         await callback.answer(f"-{coins} монет (отмена задания)", show_alert=False)
 
-    # перерисуем список дейликов
-    today = date.today().isoformat()
-    lines = ["📝 <b>Дейлики на сегодня</b>\n"]
-    kb = []
-    for c, info in DAILY_TASKS.items():
-        done = get_daily_done(uid, c, today)
-        mark = "✅" if done else "⬜"
-        lines.append(f"{mark} {info['title']} (+{info['coins']} монет)")
-        kb.append(
-            [
-                InlineKeyboardButton(
-                    text=f"{'Отменить' if done else 'Сделать'}: {info['title'][:14]}…",
-                    callback_data=f"daily:{c}",
-                )
-            ]
-        )
-    kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
-
-    await callback.message.edit_text(
-        "\n".join(lines),
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
-    )
+    text, kb = build_dailies_view(uid)
+    await callback.message.edit_text(text, reply_markup=kb)
 
 
 @dp.callback_query(F.data.startswith("dailies:"))
@@ -2380,6 +2824,163 @@ async def cb_dailies_filter(callback: CallbackQuery):
     await callback.answer()
 
 
+# ---------- МАГАЗИН ----------
+
+
+@dp.callback_query(F.data.startswith("shop:list:"))
+async def cb_shop_list(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if access_denied(uid):
+        await callback.answer("Этот бот приватный 🌙", show_alert=True)
+        return
+    try:
+        page = int(callback.data.split(":", 2)[2])
+    except ValueError:
+        page = 0
+    text, kb = build_shop_view(uid, page=page)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "shop:reset")
+async def cb_shop_reset(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if access_denied(uid):
+        await callback.answer("Этот бот приватный 🌙", show_alert=True)
+        return
+    reset_shop_filters(uid)
+    text, kb = build_shop_view(uid, page=0)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer("Фильтры сброшены")
+
+
+@dp.callback_query(F.data == "shop:catmenu")
+async def cb_shop_catmenu(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if access_denied(uid):
+        await callback.answer("Этот бот приватный 🌙", show_alert=True)
+        return
+    kb = build_shop_categories_kb(uid)
+    await callback.message.edit_text(
+        "Категория:",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("shop:cat:"))
+async def cb_shop_set_category(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if access_denied(uid):
+        await callback.answer("Этот бот приватный 🌙", show_alert=True)
+        return
+    category = callback.data.split(":", 2)[2]
+    filters = get_shop_filters(uid)
+    filters["category"] = category
+    text, kb = build_shop_view(uid, page=0)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "shop:pricemenu")
+async def cb_shop_pricemenu(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if access_denied(uid):
+        await callback.answer("Этот бот приватный 🌙", show_alert=True)
+        return
+    kb = build_shop_price_kb(uid)
+    await callback.message.edit_text(
+        "Цена:",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("shop:price:"))
+async def cb_shop_set_price(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if access_denied(uid):
+        await callback.answer("Этот бот приватный 🌙", show_alert=True)
+        return
+    parts = callback.data.split(":")
+    if len(parts) >= 3:
+        val = parts[2]
+        if val == "all":
+            get_shop_filters(uid)["price"] = "all"
+        elif val == "balance":
+            get_shop_filters(uid)["price"] = "balance"
+        elif val == "max" and len(parts) >= 4:
+            get_shop_filters(uid)["price"] = f"max:{parts[3]}"
+    text, kb = build_shop_view(uid, page=0)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("shop:item:"))
+async def cb_shop_item(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if access_denied(uid):
+        await callback.answer("Этот бот приватный 🌙", show_alert=True)
+        return
+    item_id = callback.data.split(":", 2)[2]
+    item = get_shop_reward(item_id)
+    if not item:
+        await callback.answer("Награда не найдена", show_alert=True)
+        return
+    icon = _shop_icon(item)
+    cat_label = shop_category_label(item.get("category", ""))
+    coins = get_coins(uid)
+    lines = [
+        f"{icon} <b>{item.get('name')}</b>",
+        f"{item.get('price')} мон · {cat_label}",
+        f"Баланс: {coins}",
+    ]
+    if item.get("description"):
+        lines.append("")
+        lines.append(item.get("description"))
+    kb = [
+        [
+            InlineKeyboardButton(
+                text=f"Купить за {item.get('price')} мон", callback_data=f"shop:buy:{item.get('id')}"
+            )
+        ],
+        [InlineKeyboardButton(text="⬅ К списку", callback_data="menu:shop")],
+    ]
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("shop:buy:"))
+async def cb_shop_buy(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if access_denied(uid):
+        await callback.answer("Этот бот приватный 🌙", show_alert=True)
+        return
+    item_id = callback.data.split(":", 2)[2]
+    item = get_shop_reward(item_id)
+    if not item:
+        await callback.answer("Награда не найдена", show_alert=True)
+        return
+    price = int(item.get("price", 0))
+    coins = get_coins(uid)
+    if coins < price:
+        await callback.answer("Недостаточно монет 💸", show_alert=True)
+        return
+
+    update_coins(uid, -price)
+    add_reward(uid, item.get("name"), -1)
+    new_balance = get_coins(uid)
+    await callback.answer("Награда добавлена в инвентарь ✨", show_alert=False)
+    await callback.message.answer(
+        f"🛒 Куплено: <b>{item.get('name')}</b> за {price} монет.\n"
+        f"Осталось монет: <b>{new_balance}</b>.\n"
+        "Награда появилась в инвентаре. /menu"
+    )
+
+
 # ---------- ЛУТБОКСЫ ----------
 
 
@@ -2448,6 +3049,7 @@ async def cb_use(callback: CallbackQuery):
 
 async def main():
     refresh_reward_table()
+    refresh_shop_rewards()
     refresh_tasks_from_docx()
     init_db()
     # Очистим возможный вебхук, чтобы polling не конфликтовал с другими инстансами.
