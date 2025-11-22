@@ -699,7 +699,7 @@ def _quest_level(q: Dict) -> int:
     return 0
 
 
-def _quest_by_code(code: str) -> Dict | None:
+def _quest_by_code(code: str) -> Dict:
     return next((q for q in MAIN_QUESTS if q.get("code") == code), None)
 
 
@@ -710,7 +710,7 @@ def _prev_levels_done(uid: int, lvl: int) -> bool:
     return True
 
 
-def _is_level_open(uid: int, lvl: int, today: date | None = None) -> bool:
+def _is_level_open(uid: int, lvl: int, today: date = None) -> bool:
     today = today or date.today()
     schedule = LEVEL_SCHEDULE.get(lvl)
     if schedule:
@@ -888,20 +888,35 @@ def build_profile_view(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
 
 
 def build_dailies_view(
-    uid: int, filter_coin: str = "all", search_term: str = "", page: int = 0, page_size: int = 30
+    uid: int,
+    filter_coin: str = "all",
+    search_term: str = "",
+    page: int = 0,
+    page_size: int = 15,
+    category: str = "all",
 ) -> Tuple[str, InlineKeyboardMarkup]:
     today = date.today().isoformat()
     lines = ["📝 <b>Дейлики на сегодня</b>"]
     kb_filters = [
-        InlineKeyboardButton(text="Все", callback_data="dailies:filter:all:0"),
-        InlineKeyboardButton(text="1 мон", callback_data="dailies:filter:1:0"),
-        InlineKeyboardButton(text="2 мон", callback_data="dailies:filter:2:0"),
-        InlineKeyboardButton(text="3 мон", callback_data="dailies:filter:3:0"),
-        InlineKeyboardButton(text="5 мон", callback_data="dailies:filter:5:0"),
-        InlineKeyboardButton(text="🔍 Поиск", callback_data="dailies:search"),
+        InlineKeyboardButton(text="Все", callback_data=f"dailies:filter:{filter_coin}:{category}:{page}"),
+        InlineKeyboardButton(text="1 мон", callback_data=f"dailies:filter:1:{category}:0"),
+        InlineKeyboardButton(text="2 мон", callback_data=f"dailies:filter:2:{category}:0"),
+        InlineKeyboardButton(text="3 мон", callback_data=f"dailies:filter:3:{category}:0"),
+        InlineKeyboardButton(text="5 мон", callback_data=f"dailies:filter:5:{category}:0"),
+        InlineKeyboardButton(text="🔍 Поиск", callback_data=f"dailies:search"),
+    ]
+    kb_categories = [
+        InlineKeyboardButton(text="Все категории", callback_data=f"dailies:cat:all:{filter_coin}:0"),
+        InlineKeyboardButton(text="6.1", callback_data=f"dailies:cat:6.1:{filter_coin}:0"),
+        InlineKeyboardButton(text="6.2", callback_data=f"dailies:cat:6.2:{filter_coin}:0"),
+        InlineKeyboardButton(text="6.3", callback_data=f"dailies:cat:6.3:{filter_coin}:0"),
+        InlineKeyboardButton(text="6.4", callback_data=f"dailies:cat:6.4:{filter_coin}:0"),
     ]
 
     tasks_list = list(DAILY_TASKS.items())
+    if category != "all":
+        tasks_list = [(k, v) for k, v in tasks_list if v.get("category") == category]
+        lines.append(f"Категория: {category}")
     if filter_coin != "all":
         try:
             cval = int(filter_coin)
@@ -924,7 +939,7 @@ def build_dailies_view(
     if total > page_size:
         lines.append(f"Страница {page+1}/{total_pages}")
 
-    kb = [kb_filters[:3], kb_filters[3:]]
+    kb = [kb_filters[:3], kb_filters[3:], kb_categories[:3], kb_categories[3:]]
     for code, info in page_tasks:
         done = get_daily_done(uid, code, today)
         mark = "✅" if done else "⬜"
@@ -1647,21 +1662,35 @@ async def cb_dailies_filter(callback: CallbackQuery):
         return
 
     parts = callback.data.split(":")
-    # dailies:filter:<coin>:<page> OR dailies:search
+    # dailies:filter:<coin>:<category>:<page> OR dailies:cat:<category>:<coin>:<page> OR dailies:search
     if len(parts) >= 2 and parts[1] == "search":
         DAILY_SEARCH_WAIT[uid] = True
         await callback.answer()
         await callback.message.answer("🔍 Введи текст для поиска дейликов (или /cancel)")
         return
 
-    filter_coin = parts[2] if len(parts) > 2 else "all"
+    filter_coin = "all"
+    category = "all"
     page = 0
-    try:
-        page = int(parts[3]) if len(parts) > 3 else 0
-    except ValueError:
-        page = 0
 
-    text, kb = build_dailies_view(uid, filter_coin=filter_coin, search_term="", page=page)
+    if len(parts) >= 2 and parts[1] == "filter":
+        filter_coin = parts[2] if len(parts) > 2 else "all"
+        category = parts[3] if len(parts) > 3 else "all"
+        try:
+            page = int(parts[4]) if len(parts) > 4 else 0
+        except ValueError:
+            page = 0
+    elif len(parts) >= 2 and parts[1] == "cat":
+        category = parts[2] if len(parts) > 2 else "all"
+        filter_coin = parts[3] if len(parts) > 3 else "all"
+        try:
+            page = int(parts[4]) if len(parts) > 4 else 0
+        except ValueError:
+            page = 0
+
+    text, kb = build_dailies_view(
+        uid, filter_coin=filter_coin, search_term="", page=page, category=category
+    )
     await callback.message.edit_text(text, reply_markup=kb)
     await callback.answer()
 
