@@ -1,10 +1,12 @@
 import os
 import logging
 import random
+import asyncio
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
+from urllib.parse import urlparse
 
-import asyncpg
+import pg8000
 from openpyxl import load_workbook
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -14,7 +16,7 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 
-# ----------------- Логированиеи -----------------
+# ----------------- Логирование -----------------
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -24,8 +26,7 @@ logger = logging.getLogger(__name__)
 # ----------------- Переменные окружения -----------------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-PARTNER_CHAT_ID = os.getenv("PARTNER_CHAT_ID")  # опционально, chat_id твоего парня
-PORT = int(os.getenv("PORT", "8080"))  # Railway его всё равно подставит, но нам уже не критично
+PARTNER_CHAT_ID = os.getenv("PARTNER_CHAT_ID")  # опционально, chat_id партнёра
 
 if not TELEGRAM_BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN is not set")
@@ -34,6 +35,28 @@ if not TELEGRAM_BOT_TOKEN:
 if not DATABASE_URL:
     logger.error("DATABASE_URL is not set")
     raise SystemExit("DATABASE_URL is required")
+
+# ----------------- Конфиг БД -----------------
+
+DB_CONFIG: Dict[str, object] = {}
+
+
+def parse_db_url(url: str) -> None:
+    global DB_CONFIG
+    parsed = urlparse(url)
+    DB_CONFIG = {
+        "user": parsed.username,
+        "password": parsed.password,
+        "host": parsed.hostname,
+        "port": parsed.port or 5432,
+        "database": parsed.path.lstrip("/"),
+    }
+    logger.info("DB config parsed: host=%s db=%s", DB_CONFIG["host"], DB_CONFIG["database"])
+
+
+def get_connection():
+    return pg8000.connect(**DB_CONFIG)
+
 
 # ----------------- Структуры данных -----------------
 
@@ -47,9 +70,7 @@ class LootBoxReward:
 LOOTBOX_TABLES: Dict[int, List[LootBoxReward]] = {}
 MINI_EVENTS: List[str] = []
 
-DB_POOL: Optional[asyncpg.Pool] = None
-
-# Примитивные триггеры, по которым понимаем, что награда связана с парнем
+# триггеры уведомлений партнёру
 PARTNER_KEYWORDS = [
     "от него",
     "от парня",
@@ -64,7 +85,6 @@ PARTNER_KEYWORDS = [
 def load_lootboxes_from_excel(path: str = "Лутбоксы.xlsx") -> None:
     """
     Загружаем 5 d100-таблиц лутбоксов + мини-ивенты из Excel.
-    Ориентируемся на текущую структуру файла Лутбоксы.xlsx.
     """
     global LOOTBOX_TABLES, MINI_EVENTS
     logger.info("Загружаю лутбоксы и мини-ивенты из '%s'...", path)
@@ -83,15 +103,9 @@ def load_lootboxes_from_excel(path: str = "Лутбоксы.xlsx") -> None:
                 text = str(row[1]).strip()
                 rewards.append(LootBoxReward(roll=roll, text=text))
         rewards.sort(key=lambda r: r.roll)
-        if len(rewards) != 100:
-            logger.warning(
-                "Ожидалось 100 строк в лутбоксе %s, получили %s",
-                box_number,
-                len(rewards),
-            )
         LOOTBOX_TABLES[box_number] = rewards
 
-    # Последний лист — «Мини-ивенты»
+    # Последний лист — мини-ивенты
     ws_me = wb[wb.sheetnames[-1]]
     rows = [r[0] for r in ws_me.iter_rows(values_only=True)]
 
@@ -103,7 +117,7 @@ def load_lootboxes_from_excel(path: str = "Лутбоксы.xlsx") -> None:
         if not cell:
             continue
         text = str(cell).strip()
-        # строка с номером «1.», «2.» и т.д. — начало нового ивента
+        # строки вида "1. ..." – начало нового ивента
         if re.match(r"^\D*\d+\.", text):
             if current_lines:
                 events.append("\n".join(current_lines))
@@ -127,18 +141,14 @@ def load_lootboxes_from_excel(path: str = "Лутбоксы.xlsx") -> None:
     )
 
 
-# ----------------- Работа с БД -----------------
+# ----------------- Работа с БД (pg8000, через to_thread) -----------------
 
 
 async def init_db() -> None:
-    """
-    Создаём пул подключений и базовые таблицы.
-    """
-    global DB_POOL
-    logger.info("Подключаюсь к базе данных...")
-    DB_POOL = await asyncpg.create_pool(DATABASE_URL)
-    async with DB_POOL.acquire() as conn:
-        await conn.execute(
+    def _work():
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
                 user_id     BIGINT PRIMARY KEY,
@@ -146,10 +156,10 @@ async def init_db() -> None:
                 first_name  TEXT,
                 coins       INTEGER NOT NULL DEFAULT 0,
                 created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
+            )
             """
         )
-        await conn.execute(
+        cur.execute(
             """
             CREATE TABLE IF NOT EXISTS reward_cards (
                 id          SERIAL PRIMARY KEY,
@@ -160,10 +170,10 @@ async def init_db() -> None:
                 is_opened   BOOLEAN NOT NULL DEFAULT FALSE,
                 is_used     BOOLEAN NOT NULL DEFAULT FALSE,
                 created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
+            )
             """
         )
-        await conn.execute(
+        cur.execute(
             """
             CREATE TABLE IF NOT EXISTS inventory_items (
                 id              SERIAL PRIMARY KEY,
@@ -172,137 +182,258 @@ async def init_db() -> None:
                 source_card_id  INTEGER REFERENCES reward_cards(id),
                 is_consumed     BOOLEAN NOT NULL DEFAULT FALSE,
                 created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            );
+            )
             """
         )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    logger.info("Инициализирую схему БД...")
+    await asyncio.to_thread(_work)
     logger.info("Схема БД инициализирована.")
 
 
-async def get_or_create_user(
-    user_id: int, username: str, first_name: str
-) -> asyncpg.Record:
-    async with DB_POOL.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
-        if row:
-            return row
-        await conn.execute(
-            "INSERT INTO users(user_id, username, first_name) VALUES($1,$2,$3)",
-            user_id,
-            username,
-            first_name,
+async def get_or_create_user(user_id: int, username: str, first_name: str) -> Dict:
+    def _work():
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT user_id, username, first_name, coins FROM users WHERE user_id=%s",
+            (user_id,),
         )
-        return await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
+        row = cur.fetchone()
+        if not row:
+            cur.execute(
+                "INSERT INTO users(user_id, username, first_name) VALUES(%s,%s,%s)",
+                (user_id, username, first_name),
+            )
+            conn.commit()
+            cur.execute(
+                "SELECT user_id, username, first_name, coins FROM users WHERE user_id=%s",
+                (user_id,),
+            )
+            row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return {"user_id": row[0], "username": row[1], "first_name": row[2], "coins": row[3]}
+
+    return await asyncio.to_thread(_work)
 
 
-async def get_user(user_id: int) -> Optional[asyncpg.Record]:
-    async with DB_POOL.acquire() as conn:
-        return await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
+async def get_user(user_id: int) -> Optional[Dict]:
+    def _work():
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT user_id, username, first_name, coins FROM users WHERE user_id=%s",
+            (user_id,),
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            return None
+        return {"user_id": row[0], "username": row[1], "first_name": row[2], "coins": row[3]}
+
+    return await asyncio.to_thread(_work)
 
 
 async def update_coins(user_id: int, delta: int) -> int:
-    async with DB_POOL.acquire() as conn:
-        row = await conn.fetchrow(
-            "UPDATE users SET coins = coins + $1 WHERE user_id=$2 RETURNING coins",
-            delta,
-            user_id,
+    def _work():
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE users SET coins = coins + %s WHERE user_id=%s RETURNING coins",
+            (delta, user_id),
         )
-        return row["coins"]
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        return row[0]
+
+    return await asyncio.to_thread(_work)
 
 
 async def add_reward_card(
     user_id: int, box_type: int, roll: int, reward_text: str
 ) -> int:
-    async with DB_POOL.acquire() as conn:
-        row = await conn.fetchrow(
+    def _work():
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
             """
             INSERT INTO reward_cards(user_id, box_type, roll, reward_text)
-            VALUES($1,$2,$3,$4)
+            VALUES(%s,%s,%s,%s)
             RETURNING id
             """,
-            user_id,
-            box_type,
-            roll,
-            reward_text,
+            (user_id, box_type, roll, reward_text),
         )
-        return row["id"]
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        return row[0]
+
+    return await asyncio.to_thread(_work)
 
 
-async def list_reward_cards(user_id: int) -> List[asyncpg.Record]:
-    async with DB_POOL.acquire() as conn:
-        rows = await conn.fetch(
+async def list_reward_cards(user_id: int) -> List[Dict]:
+    def _work():
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
             """
-            SELECT * FROM reward_cards
-            WHERE user_id=$1
+            SELECT id, box_type, roll, reward_text, is_opened, is_used, created_at
+            FROM reward_cards
+            WHERE user_id=%s
             ORDER BY created_at DESC
             """,
-            user_id,
+            (user_id,),
         )
-        return list(rows)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        res = []
+        for r in rows:
+            res.append(
+                {
+                    "id": r[0],
+                    "box_type": r[1],
+                    "roll": r[2],
+                    "reward_text": r[3],
+                    "is_opened": r[4],
+                    "is_used": r[5],
+                    "created_at": r[6],
+                }
+            )
+        return res
+
+    return await asyncio.to_thread(_work)
 
 
-async def open_reward_card(card_id: int) -> Optional[asyncpg.Record]:
-    async with DB_POOL.acquire() as conn:
-        row = await conn.fetchrow(
+async def open_reward_card(card_id: int) -> Optional[Dict]:
+    def _work():
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
             """
             UPDATE reward_cards
             SET is_opened = TRUE
-            WHERE id=$1
-            RETURNING *
+            WHERE id=%s AND is_opened = FALSE
+            RETURNING id, user_id, box_type, roll, reward_text, is_opened, is_used, created_at
             """,
-            card_id,
+            (card_id,),
         )
-        if row:
-            await conn.execute(
-                """
-                INSERT INTO inventory_items(user_id, description, source_card_id)
-                VALUES($1,$2,$3)
-                """,
-                row["user_id"],
-                row["reward_text"],
-                row["id"],
-            )
-        return row
-
-
-async def list_inventory(user_id: int) -> List[asyncpg.Record]:
-    async with DB_POOL.acquire() as conn:
-        rows = await conn.fetch(
+        row = cur.fetchone()
+        if not row:
+            conn.commit()
+            cur.close()
+            conn.close()
+            return None
+        # сразу кладём в инвентарь
+        cur.execute(
             """
-            SELECT * FROM inventory_items
-            WHERE user_id=$1
+            INSERT INTO inventory_items(user_id, description, source_card_id)
+            VALUES(%s,%s,%s)
+            """,
+            (row[1], row[4], row[0]),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {
+            "id": row[0],
+            "user_id": row[1],
+            "box_type": row[2],
+            "roll": row[3],
+            "reward_text": row[4],
+            "is_opened": row[5],
+            "is_used": row[6],
+            "created_at": row[7],
+        }
+
+    return await asyncio.to_thread(_work)
+
+
+async def list_inventory(user_id: int) -> List[Dict]:
+    def _work():
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT id, description, is_consumed, created_at
+            FROM inventory_items
+            WHERE user_id=%s
             ORDER BY created_at DESC
             """,
-            user_id,
+            (user_id,),
         )
-        return list(rows)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        res = []
+        for r in rows:
+            res.append(
+                {
+                    "id": r[0],
+                    "description": r[1],
+                    "is_consumed": r[2],
+                    "created_at": r[3],
+                }
+            )
+        return res
+
+    return await asyncio.to_thread(_work)
 
 
-async def consume_inventory_item(item_id: int) -> Optional[asyncpg.Record]:
-    async with DB_POOL.acquire() as conn:
-        row = await conn.fetchrow(
+async def consume_inventory_item(item_id: int) -> Optional[Dict]:
+    def _work():
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute(
             """
             UPDATE inventory_items
             SET is_consumed = TRUE
-            WHERE id=$1 AND is_consumed=FALSE
-            RETURNING *
+            WHERE id=%s AND is_consumed = FALSE
+            RETURNING id, user_id, description, is_consumed, created_at
             """,
-            item_id,
+            (item_id,),
         )
-        return row
+        row = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "user_id": row[1],
+            "description": row[2],
+            "is_consumed": row[3],
+            "created_at": row[4],
+        }
+
+    return await asyncio.to_thread(_work)
 
 
 async def reset_user(user_id: int) -> None:
-    async with DB_POOL.acquire() as conn:
-        await conn.execute("DELETE FROM users WHERE user_id=$1", user_id)
+    def _work():
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM users WHERE user_id=%s", (user_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    await asyncio.to_thread(_work)
 
 
 # ----------------- Логика игры -----------------
 
 
 def reward_for_box(box_type: int) -> Tuple[int, str]:
-    """
-    Бросаем d100 и достаём награду из нужной таблицы.
-    """
     rewards = LOOTBOX_TABLES.get(box_type)
     if not rewards:
         raise ValueError(f"Unknown lootbox type {box_type}")
@@ -349,17 +480,24 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user = update.effective_user
     row = await get_user(user.id)
     if not row:
-        await get_or_create_user(
+        row = await get_or_create_user(
             user.id, user.username or "", user.first_name or user.full_name or ""
         )
-        row = await get_user(user.id)
-    async with DB_POOL.acquire() as conn:
-        cards_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM reward_cards WHERE user_id=$1", user.id
-        )
-        inv_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM inventory_items WHERE user_id=$1", user.id
-        )
+
+    # Для красоты можно посчитать кол-во карт и предметов
+    async def _counts():
+        conn = get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM reward_cards WHERE user_id=%s", (user.id,))
+        cards_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM inventory_items WHERE user_id=%s", (user.id,))
+        inv_count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        return cards_count, inv_count
+
+    cards_count, inv_count = await asyncio.to_thread(_counts)
+
     text = (
         f"Профиль {user.first_name}:\n"
         f"Монеты: {row['coins']}\n"
@@ -370,9 +508,6 @@ async def cmd_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_add_coins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Временная команда для тестов: /addcoins 10
-    """
     user = update.effective_user
     if not context.args:
         await update.message.reply_text("Использование: /addcoins <число>")
@@ -434,12 +569,10 @@ async def cb_buy_box(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         return
 
-    # списываем монеты
     await update_coins(user.id, -cost)
     roll, reward_text = reward_for_box(box_type)
     card_id = await add_reward_card(user.id, box_type, roll, reward_text)
 
-    # «Анимация» открытия
     msg = (
         f"✨ Ты купила лутбокс {box_type} за {cost} монет.\n"
         "Бросаем кость d100...\n"
@@ -452,7 +585,6 @@ async def cb_buy_box(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     ]
     await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard))
 
-    # Уведомление партнёру, если награда про него
     if PARTNER_CHAT_ID and partner_should_be_notified(reward_text):
         try:
             await context.bot.send_message(
@@ -561,7 +693,7 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def on_startup(app):
-    # грузим Excel и поднимаем БД при запуске
+    parse_db_url(DATABASE_URL)
     load_lootboxes_from_excel("Лутбоксы.xlsx")
     await init_db()
 
@@ -571,9 +703,9 @@ def main() -> None:
 
     application = (
         ApplicationBuilder()
-            .token(TELEGRAM_BOT_TOKEN)
-            .post_init(on_startup)
-            .build()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(on_startup)
+        .build()
     )
 
     # команды
@@ -592,7 +724,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(cb_open_card, pattern=r"^open_card:"))
     application.add_handler(CallbackQueryHandler(cb_use_item, pattern=r"^use_item:"))
 
-    # ВАЖНО: никакого webhook, только polling — ошибки с Updater больше не будет
+    # только polling — никакого webhook и Updater
     application.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
