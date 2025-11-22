@@ -437,7 +437,7 @@ def load_lootbox_reward_tables_from_excel(xlsx_path: str) -> Dict[int, List[Tupl
             }
 
             sheet_paths: Dict[int, str] = {}
-            for sheet in workbook.findall(f"{ns_main}sheet"):
+            for sheet in workbook.findall(f".//{ns_main}sheet"):
                 name = sheet.attrib.get("name", "")
                 rid = sheet.attrib.get(
                     "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
