@@ -8,6 +8,7 @@ from typing import Dict, List, Tuple
 from xml.etree import ElementTree as ET
 
 from dotenv import load_dotenv
+import re
 
 try:
     from aiogram import Bot, Dispatcher, F
@@ -245,6 +246,10 @@ LOOTBOXES = {
 
 # Упрощённые d100-таблицы для лутбоксов (можешь позже вставить свои большие)
 LOOTBOX_XLSX_CANDIDATES = ["lootbox.xlsx", "Лутбоксы.xlsx"]
+TASKS_DOCX_CANDIDATES = [
+    os.getenv("TASKS_DOCX"),
+    "🎮 RLViGame_bot.docx",
+]
 DEFAULT_REWARD_TABLE = {
     1: [
         (40, "🧁 Маленькая вкусняшка"),
@@ -519,6 +524,135 @@ def refresh_reward_table():
         print("Используются встроенные награды лутбоксов")
 
 
+def _load_docx_lines(docx_path: str) -> List[str]:
+    """Возвращает список строк (абзацев) из docx."""
+    with zipfile.ZipFile(docx_path) as zf:
+        xml = zf.read("word/document.xml")
+    root = ET.fromstring(xml)
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    lines = []
+    for p in root.findall(".//w:p", ns):
+        texts = [t.text for t in p.findall(".//w:t", ns) if t.text]
+        if texts:
+            lines.append("".join(texts))
+    return lines
+
+
+def load_main_quests_from_docx(docx_path: str) -> List[Dict]:
+    """
+    Парсит docx и достаёт мейн-квесты вида:
+    '1.1 Название → Rare ×1 + 3 coin'
+    Возвращает список с последовательной нумерацией для БД и оригинальным кодом.
+    """
+    try:
+        lines = _load_docx_lines(docx_path)
+    except Exception as exc:
+        print(f"Не удалось прочитать docx для квестов: {exc}")
+        return []
+
+    pattern = re.compile(
+        r"(?P<code>\d+\.\d+)\s+(?P<title>.+?)\s*→\s*(?P<rarity>[A-Za-zА-Яа-я]+)\s*×1\s*\+\s*(?P<coins>\d+)\s*coin",
+        re.IGNORECASE,
+    )
+
+    quests = []
+    seen = set()
+    for line in lines:
+        for m in pattern.finditer(line):
+            rarity = m.group("rarity").strip().lower()
+            rarity = {
+                "common": "common",
+                "uncommon": "uncommon",
+                "rare": "rare",
+                "epic": "epic",
+                "legendary": "legendary",
+            }.get(rarity, "common")
+            key = (m.group("code"), m.group("title").strip())
+            if key in seen:
+                continue
+            seen.add(key)
+            quests.append(
+                {
+                    "code": m.group("code"),
+                    "title": m.group("title").strip(),
+                    "reward_coins": int(m.group("coins")),
+                    "reward_card": rarity,
+                }
+            )
+
+    for idx, q in enumerate(quests, start=1):
+        q["index"] = idx
+        q["desc"] = "См. описание в документе."
+    return quests
+
+
+def load_daily_tasks_from_docx(docx_path: str) -> Dict[str, Dict]:
+    """Читает docx и собирает категории 6.1–6.4 с монетами 1/2/3/5."""
+    try:
+        lines = _load_docx_lines(docx_path)
+    except Exception as exc:
+        print(f"Не удалось прочитать docx для дейликов: {exc}")
+        return {}
+
+    categories = [
+        ("6.1", 1),
+        ("6.2", 2),
+        ("6.3", 3),
+        ("6.4", 5),
+    ]
+    starts = {}
+    for idx, line in enumerate(lines):
+        for code, _coins in categories:
+            if line.startswith(("● " + code, "▲ " + code, "★ " + code, "⏱ " + code)):
+                starts[code] = idx
+
+    tasks: Dict[str, Dict] = {}
+    for code, coins in categories:
+        if code not in starts:
+            continue
+        start_idx = starts[code] + 1
+        next_indices = [i for c, i in starts.items() if i > starts[code]]
+        end_idx = min(next_indices) if next_indices else len(lines)
+        bucket: List[str] = []
+        for offset, line in enumerate(lines[start_idx:end_idx]):
+            if not line or "вариант" in line.lower() or "монет" in line.lower():
+                continue
+            # пропустим первые описательные строки после заголовка
+            if offset < 2:
+                continue
+            text = line.strip()
+            if not text:
+                continue
+            bucket.append(text)
+        for i, title in enumerate(bucket, start=1):
+            key = f"d{code.replace('.', '')}_{i}"
+            tasks[key] = {"title": title, "coins": coins}
+    return tasks
+
+
+def refresh_tasks_from_docx():
+    """Обновляет MAIN_QUESTS и DAILY_TASKS из docx, иначе оставляет дефолты."""
+    global MAIN_QUESTS, DAILY_TASKS
+    docx_path = next((p for p in TASKS_DOCX_CANDIDATES if p and os.path.exists(p)), None)
+    if not docx_path:
+        print("Docx с квестами/дейликами не найден, используются дефолты")
+        return
+
+    main_quests = load_main_quests_from_docx(docx_path)
+    if main_quests:
+        MAIN_QUESTS = main_quests
+        print(f"Мейн-квесты загружены из {docx_path}: {len(MAIN_QUESTS)} шт.")
+    else:
+        print("Не удалось загрузить мейн-квесты из docx, дефолтные.")
+
+    daily = load_daily_tasks_from_docx(docx_path)
+    if daily:
+        DAILY_TASKS = daily
+        print(f"Дейлики загружены из {docx_path}: {len(DAILY_TASKS)} шт.")
+    else:
+        print("Не удалось загрузить дейлики из docx, дефолтные.")
+
+
 def roll_reward(box_level: int) -> str:
     roll = random.randint(1, 100)
     table = REWARD_TABLE.get(box_level) or DEFAULT_REWARD_TABLE.get(box_level, [])
@@ -645,7 +779,8 @@ async def cb_menu(callback: CallbackQuery):
                 mark = "🟡"
             else:
                 mark = "🔒"
-            lines.append(f"{mark} {q['index']}. {q['title']}")
+            label = q.get("code", str(q["index"]))
+            lines.append(f"{mark} {label}. {q['title']}")
 
         active_index = None
         for q in MAIN_QUESTS:
@@ -803,8 +938,9 @@ async def cb_open_quest(callback: CallbackQuery):
     # Анимация движения по карте
     await show_path_animation(callback.message, quest["title"])
 
+    label = quest.get("code", str(idx))
     text = (
-        f"📖 <b>Квест {idx}: {quest['title']}</b>\n\n"
+        f"📖 <b>Квест {label}: {quest['title']}</b>\n\n"
         f"{quest['desc']}\n\n"
         f"Награда: <b>{quest['reward_coins']}</b> монет и карта-награда "
         f"{REWARD_CARDS[quest['reward_card']]['label']}."
@@ -857,7 +993,7 @@ async def cb_quest_done(callback: CallbackQuery):
     # карта-награда
     card_key = quest["reward_card"]
     card_cfg = REWARD_CARDS.get(card_key, REWARD_CARDS["common"])
-    card_name = card_cfg["label"] + f" (за квест {idx})"
+    card_name = card_cfg["label"] + f" (за квест {quest.get('code', idx)})"
 
     # box_level = 0, чтобы отличать от лутбоксовых наград
     add_reward(uid, card_name, 0)
@@ -866,7 +1002,7 @@ async def cb_quest_done(callback: CallbackQuery):
     await show_card_animation(callback.message, card_cfg["label"])
 
     text = (
-        f"🎉 <b>Квест {idx} выполнен!</b>\n\n"
+        f"🎉 <b>Квест {quest.get('code', idx)} выполнен!</b>\n\n"
         f"Ты получила <b>{coins_reward}</b> монет и карту-награду:\n"
         f"{card_cfg['label']}\n\n"
         "Карта добавлена в инвентарь. Когда захочешь, можешь «обналичить» её "
@@ -998,6 +1134,7 @@ async def cb_use(callback: CallbackQuery):
 
 async def main():
     refresh_reward_table()
+    refresh_tasks_from_docx()
     init_db()
     # Очистим возможный вебхук, чтобы polling не конфликтовал с другими инстансами.
     await bot.delete_webhook(drop_pending_updates=True)
