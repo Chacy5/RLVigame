@@ -9,6 +9,7 @@ from xml.etree import ElementTree as ET
 
 from dotenv import load_dotenv
 import re
+import uuid
 
 try:
     from aiogram import Bot, Dispatcher, F
@@ -292,6 +293,13 @@ REWARD_CARDS = {
     "epic": {"label": "🟧 Эпическая карта награды"},
     "legendary": {"label": "🟥 Легендарная карта награды"},
 }
+RARITY_TO_BOX_LEVEL = {
+    "common": 1,
+    "uncommon": 2,
+    "rare": 3,
+    "epic": 4,
+    "legendary": 5,
+}
 
 # Основные квесты — под твой реальный план
 MAIN_QUESTS = [
@@ -413,6 +421,7 @@ QUEST_DEPENDENCIES = {
     "2.5": "2.4",
     "2.7": "2.6",
 }
+QUEST_CHOICES: Dict[int, Dict[str, Dict]] = {}
 
 
 def _excel_col_to_index(col: str) -> int:
@@ -612,7 +621,7 @@ def load_main_quests_from_docx(docx_path: str) -> List[Dict]:
 
     for idx, q in enumerate(quests, start=1):
         q["index"] = idx
-        q["desc"] = "См. описание в документе."
+        q["desc"] = ""
     return quests
 
 
@@ -718,6 +727,8 @@ def _grant_level_final(uid: int, lvl: int):
         card_cfg = REWARD_CARDS.get(rarity, REWARD_CARDS["common"])
         add_reward(uid, f"{final_marker}: {card_cfg['label']}", 0)
 
+    print(f"Выдан финал уровня {lvl} пользователю {uid}: +{coins} монет, карты {meta.get('final_cards')}")
+
 
 def refresh_tasks_from_docx():
     """Обновляет MAIN_QUESTS и DAILY_TASKS из docx, иначе оставляет дефолты."""
@@ -749,6 +760,15 @@ def roll_reward(box_level: int) -> str:
         if roll <= threshold:
             return f"{name} (d100={roll})"
     return f"Сюрприз (d100={roll})"
+
+
+def pick_rewards(box_level: int, count: int = 3) -> List[str]:
+    table = REWARD_TABLE.get(box_level) or DEFAULT_REWARD_TABLE.get(box_level, [])
+    names = [name for _, name in table]
+    if not names:
+        return []
+    # случайная выборка с возможными повторами, но чаще всего разные
+    return random.sample(names, k=min(count, len(names)))
 
 
 # ================== TELEGRAM-БОТ ==================
@@ -1034,12 +1054,19 @@ async def cb_open_quest(callback: CallbackQuery):
     await show_path_animation(callback.message, quest["title"])
 
     label = quest.get("code", str(idx))
-    text = (
-        f"📖 <b>Квест {label}: {quest['title']}</b>\n\n"
-        f"{quest['desc']}\n\n"
-        f"Награда: <b>{quest['reward_coins']}</b> монет и карта-награда "
-        f"{REWARD_CARDS[quest['reward_card']]['label']}."
+    desc = quest.get("desc") or ""
+    parts = [
+        f"📖 <b>Квест {label}: {quest['title']}</b>",
+    ]
+    if desc:
+        parts.append(desc)
+    card_label = REWARD_CARDS[quest["reward_card"]]["label"]
+    box_lvl = RARITY_TO_BOX_LEVEL.get(quest["reward_card"], 1)
+    parts.append(
+        f"Награда: <b>{quest['reward_coins']}</b> монет и выбор 1 награды "
+        f"из лутбокса L{box_lvl} ({card_label})."
     )
+    text = "\n\n".join(parts)
     kb = [
         [
             InlineKeyboardButton(
@@ -1089,29 +1116,74 @@ async def cb_quest_done(callback: CallbackQuery):
     coins_reward = quest["reward_coins"]
     update_coins(uid, coins_reward)
 
-    # карта-награда
-    card_key = quest["reward_card"]
-    card_cfg = REWARD_CARDS.get(card_key, REWARD_CARDS["common"])
-    card_name = card_cfg["label"] + f" (за квест {quest.get('code', idx)})"
-
-    # box_level = 0, чтобы отличать от лутбоксовых наград
-    add_reward(uid, card_name, 0)
-
-    # анимация открытия карты
-    await show_card_animation(callback.message, card_cfg["label"])
+    # выбор награды из соответствующего лутбокса
+    box_level = RARITY_TO_BOX_LEVEL.get(quest["reward_card"], 1)
+    options = pick_rewards(box_level, 3)
+    token = uuid.uuid4().hex[:8]
+    QUEST_CHOICES.setdefault(uid, {})[token] = {
+        "options": options,
+        "box_level": box_level,
+    }
 
     _grant_level_final(uid, _quest_level(quest))
 
-    text = (
-        f"🎉 <b>Квест {quest.get('code', idx)} выполнен!</b>\n\n"
-        f"Ты получила <b>{coins_reward}</b> монет и карту-награду:\n"
-        f"{card_cfg['label']}\n\n"
-        "Карта добавлена в инвентарь. Когда захочешь, можешь «обналичить» её "
-        "в реальном мире (выбрать приз из этого диапазона).\n\n"
-        "Открыть меню: /menu"
+    parts = [
+        f"🎉 <b>Квест {quest.get('code', idx)} выполнен!</b>",
+        f"Ты получила <b>{coins_reward}</b> монет.",
+        f"Выбери 1 из 3 наград лутбокса L{box_level}:",
+    ]
+    kb = []
+    for i, opt in enumerate(options, start=1):
+        kb.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{i}. {opt[:40]}",
+                    callback_data=f"questpick:{token}:{i-1}",
+                )
+            ]
+        )
+    kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
+    await callback.message.answer(
+        "\n\n".join(parts),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
     )
-    await callback.message.answer(text)
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("questpick:"))
+async def cb_pick_reward(callback: CallbackQuery):
+    uid = callback.from_user.id
+    try:
+        _, token, idx_str = callback.data.split(":", 2)
+        opt_idx = int(idx_str)
+    except Exception:
+        await callback.answer("Неверный выбор", show_alert=True)
+        return
+
+    user_choices = QUEST_CHOICES.get(uid, {})
+    payload = user_choices.get(token)
+    if not payload:
+        await callback.answer("Выбор недоступен", show_alert=True)
+        return
+
+    options = payload.get("options", [])
+    if not (0 <= opt_idx < len(options)):
+        await callback.answer("Неверный выбор", show_alert=True)
+        return
+
+    reward_name = options[opt_idx]
+    box_level = payload.get("box_level", 0)
+    add_reward(uid, reward_name, box_level)
+
+    # очистить выбор, чтобы нельзя было брать многократно
+    user_choices.pop(token, None)
+    if not user_choices:
+        QUEST_CHOICES.pop(uid, None)
+
+    await callback.answer("Награда добавлена в инвентарь ✨", show_alert=False)
+    await callback.message.answer(
+        f"🏆 Ты выбрала: <b>{reward_name}</b>\nНаграда добавлена в инвентарь. /menu"
+    )
 
 
 @dp.callback_query(F.data.startswith("level:"))
