@@ -405,9 +405,9 @@ LEVEL_LABELS = {
 
 # Метаданные уровней: даты и финальные награды
 LEVEL_META = {
-    0: {"dates": "20–25 ноября 2024", "final_coins": 0, "final_cards": []},
-    1: {"dates": "20 ноября — 12 декабря 2024", "final_coins": 5, "final_cards": ["uncommon"]},
-    2: {"dates": "12 декабря 2024 — 7 января 2025", "final_coins": 5, "final_cards": ["rare"]},
+    0: {"dates": "20–25 ноября 2025", "final_coins": 0, "final_cards": []},
+    1: {"dates": "20 ноября — 12 декабря 2025", "final_coins": 5, "final_cards": ["uncommon"]},
+    2: {"dates": "12 декабря 2025 — 7 января 2025", "final_coins": 5, "final_cards": ["rare"]},
     3: {"dates": "7 января — 20 февраля 2025", "final_coins": 5, "final_cards": ["epic"]},
     4: {"dates": "20 февраля — 20 марта 2025", "final_coins": 10, "final_cards": ["legendary"]},
     5: {"dates": "20 марта — 20 апреля 2025", "final_coins": 15, "final_cards": ["epic", "legendary"]},
