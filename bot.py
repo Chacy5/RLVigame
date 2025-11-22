@@ -489,6 +489,20 @@ SHOP_REWARDS: List[Dict] = []
 SHOP_PRICE_PRESETS = [10, 20, 30, 40, 50, 75, 100, 150, 200, 300, 500]
 SHOP_FILTERS: Dict[int, Dict] = defaultdict(lambda: {"category": "all", "price": "all"})
 SHOP_PAGE_SIZE = 8
+SHOP_CATEGORY_ICONS = {
+    "mtg": "𓂀",
+    "mtg_cash": "𓊗",
+    "selfcare": "𓁹",
+    "games": "☸",
+    "tech": "𓆤",
+    "food": "𓉐",
+    "home": "𓏏",
+    "comfort": "𓃭",
+    "style": "✦",
+    "hobby": "𓀿",
+    "travel": "✺",
+    "default": "⟡",
+}
 
 # Основные квесты — под твой реальный план
 MAIN_QUESTS = [
@@ -1949,7 +1963,10 @@ def build_dailies_view(
 
 
 def _shop_icon(item: Dict) -> str:
-    return item.get("emoji") or "🏷️"
+    cat = item.get("category")
+    if cat and cat in SHOP_CATEGORY_ICONS:
+        return SHOP_CATEGORY_ICONS[cat]
+    return item.get("emoji") or SHOP_CATEGORY_ICONS.get("default", "⟡")
 
 
 def shop_category_label(cat: str) -> str:
