@@ -235,7 +235,7 @@ LOOTBOXES = {
 }
 
 # Упрощённые d100-таблицы для лутбоксов (можешь позже вставить свои большие)
-LOOTBOX_REWARDS_XLSX = "lootbox.xlsx"
+LOOTBOX_XLSX_CANDIDATES = ["lootbox.xlsx", "Лутбоксы.xlsx"]
 DEFAULT_REWARD_TABLE = {
     1: [
         (40, "🧁 Маленькая вкусняшка"),
@@ -491,7 +491,11 @@ def load_lootbox_reward_tables_from_excel(xlsx_path: str) -> Dict[int, List[Tupl
 def refresh_reward_table():
     """Обновляет глобальную таблицу наград из Excel с откатом к дефолту."""
     global REWARD_TABLE
-    loaded = load_lootbox_reward_tables_from_excel(LOOTBOX_REWARDS_XLSX)
+    env_path = os.getenv("LOOTBOX_XLSX")
+    candidates = [env_path] + LOOTBOX_XLSX_CANDIDATES
+    xlsx_path = next((p for p in candidates if p and os.path.exists(p)), candidates[1])
+
+    loaded = load_lootbox_reward_tables_from_excel(xlsx_path)
     merged: Dict[int, List[Tuple[int, str]]] = {}
     for lvl in LOOTBOXES:
         if loaded.get(lvl):
@@ -501,7 +505,7 @@ def refresh_reward_table():
     REWARD_TABLE = merged
 
     if loaded:
-        print(f"Награды лутбоксов загружены из {LOOTBOX_REWARDS_XLSX}")
+        print(f"Награды лутбоксов загружены из {xlsx_path}")
     else:
         print("Используются встроенные награды лутбоксов")
 
