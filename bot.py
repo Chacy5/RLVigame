@@ -10,6 +10,7 @@ from xml.etree import ElementTree as ET
 from dotenv import load_dotenv
 import re
 import uuid
+from collections import defaultdict
 
 try:
     from aiogram import Bot, Dispatcher, F
@@ -111,10 +112,10 @@ def get_or_create_user(user_id: int) -> int:
     if row is None:
         c.execute(
             "INSERT INTO users(user_id, coins, created_at) VALUES(?,?,?)",
-            (user_id, 50, datetime.utcnow().isoformat()),
+            (user_id, 0, datetime.utcnow().isoformat()),
         )
         conn.commit()
-        coins = 50
+        coins = 0
     else:
         coins = row[0]
     conn.close()
@@ -384,13 +385,7 @@ MAIN_QUESTS = [
 ]
 
 # Дейлики
-DAILY_TASKS = {
-    "work_1": {"title": "1 фокус-слот работы (25–50 мин)", "coins": 4},
-    "work_2": {"title": "Ответить на важные сообщения/клиентов", "coins": 3},
-    "self_1": {"title": "Мини-уход за собой (душ/крем/что-то милое)", "coins": 2},
-    "home_1": {"title": "10 минут уборки или разбора завалов", "coins": 2},
-    "rest_1": {"title": "Осознанный отдых 15 минут без телефона", "coins": 2},
-}
+DAILY_TASKS = {}
 
 LEVEL_LABELS = {
     0: "🟣 УРОВЕНЬ 0 — СТАРТ",
@@ -445,6 +440,8 @@ LEVEL_SCHEDULE = {
     6: {"start": date(2026, 4, 20), "end": date(2026, 5, 5)},
     7: {"start": date(2026, 5, 5), "end": date(2026, 5, 31)},
 }
+
+DAILY_SEARCH_WAIT: Dict[int, bool] = {}
 
 
 def _excel_col_to_index(col: str) -> int:
@@ -776,6 +773,37 @@ def _grant_level_final(uid: int, lvl: int):
     print(f"Выдан финал уровня {lvl} пользователю {uid}: +{coins} монет, карты {meta.get('final_cards')}")
 
 
+def reset_user_progress(uid: int):
+    conn = get_conn()
+    c = conn.cursor()
+    for table in ("users", "rewards", "main_progress", "daily_tasks"):
+        c.execute(f"DELETE FROM {table} WHERE user_id = ?", (uid,))
+    conn.commit()
+    conn.close()
+    coins = get_or_create_user(uid)
+    _ensure_unlocks(uid)
+    return coins
+
+
+def level_progress(uid: int) -> str:
+    levels = {}
+    for q in MAIN_QUESTS:
+        lvl = _quest_level(q)
+        levels.setdefault(lvl, []).append(q)
+    current_lvl = None
+    for lvl in sorted(levels):
+        if not all(get_main_status(uid, q["index"]) == "done" for q in levels[lvl]):
+            current_lvl = lvl
+            break
+    if current_lvl is None:
+        current_lvl = max(levels) if levels else 0
+    quests = levels.get(current_lvl, [])
+    done = sum(1 for q in quests if get_main_status(uid, q["index"]) == "done")
+    total = len(quests)
+    title = LEVEL_LABELS.get(current_lvl, f"Уровень {current_lvl}")
+    return f"{title}: {done}/{total} квестов"
+
+
 def refresh_tasks_from_docx():
     """Обновляет MAIN_QUESTS и DAILY_TASKS из docx, иначе оставляет дефолты."""
     global MAIN_QUESTS, DAILY_TASKS
@@ -798,8 +826,114 @@ def refresh_tasks_from_docx():
     else:
         print("Не удалось загрузить дейлики из docx, дефолтные.")
 
+# ================== ВСПОМОГАТЕЛЬНЫЕ ОТРИСОВКИ ==================
+
+
+def build_map_view(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    _ensure_unlocks(uid)
+    levels = {}
+    for q in MAIN_QUESTS:
+        lvl = _quest_level(q)
+        levels.setdefault(lvl, []).append(q)
+
+    kb = []
+    lines = ["📍 <b>Квест-карта</b>\n"]
+    for lvl in sorted(levels):
+        quests = levels[lvl]
+        statuses = []
+        level_open = _is_level_open(uid, lvl)
+        for q in quests:
+            st = get_main_status(uid, q["index"])
+            if not level_open:
+                st = "locked"
+            statuses.append(st)
+        if all(s == "done" for s in statuses):
+            mark = "✅"
+        elif any(s == "active" for s in statuses):
+            mark = "🟡"
+        else:
+            mark = "🔒"
+        title = LEVEL_LABELS.get(lvl, f"Уровень {lvl}")
+        date_range = LEVEL_META.get(lvl, {}).get("dates", "")
+        date_label = f" ({date_range})" if date_range else ""
+        lines.append(f"{mark} {title}{date_label}")
+        kb.append(
+            [
+                InlineKeyboardButton(
+                    text=f"Открыть {title[:28]}",
+                    callback_data=f"level:{lvl}",
+                )
+            ]
+        )
+
+    kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def build_profile_view(uid: int) -> Tuple[str, InlineKeyboardMarkup]:
+    coins = get_coins(uid)
+    progress = level_progress(uid)
+    text = (
+        f"💰 Монет: <b>{coins}</b>\n"
+        f"🏃 Прогресс: {progress}\n\n"
+        "Сбросит игру: удалит монеты, награды и прогресс квестов."
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Сбросить игру", callback_data="reset:ask")],
+            [InlineKeyboardButton(text="⬅ К карте", callback_data="menu:map")],
+        ]
+    )
+    return text, kb
+
+
+def build_dailies_view(uid: int, filter_coin: str = "all", search_term: str = "") -> Tuple[str, InlineKeyboardMarkup]:
+    today = date.today().isoformat()
+    lines = ["📝 <b>Дейлики на сегодня</b>"]
+    kb_filters = [
+        InlineKeyboardButton(text="Все", callback_data="dailies:filter:all"),
+        InlineKeyboardButton(text="1 мон", callback_data="dailies:filter:1"),
+        InlineKeyboardButton(text="2 мон", callback_data="dailies:filter:2"),
+        InlineKeyboardButton(text="3 мон", callback_data="dailies:filter:3"),
+        InlineKeyboardButton(text="5 мон", callback_data="dailies:filter:5"),
+        InlineKeyboardButton(text="🔍 Поиск", callback_data="dailies:search"),
+    ]
+
+    tasks = DAILY_TASKS.items()
+    if filter_coin != "all":
+        try:
+            cval = int(filter_coin)
+            tasks = [(k, v) for k, v in tasks if v.get("coins") == cval]
+            lines.append(f"Фильтр: {cval} монет")
+        except ValueError:
+            pass
+    if search_term:
+        tasks = [(k, v) for k, v in tasks if search_term.lower() in v.get("title", "").lower()]
+        lines.append(f"Поиск: “{search_term}”")
+
+    kb = [kb_filters[:3], kb_filters[3:]]
+    for code, info in tasks:
+        done = get_daily_done(uid, code, today)
+        mark = "✅" if done else "⬜"
+        lines.append(f"{mark} {info['title']} (+{info['coins']} монет)")
+        kb.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{'Отменить' if done else 'Сделать'}: {info['title'][:18]}…",
+                    callback_data=f"daily:{code}",
+                )
+            ]
+        )
+    kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
+
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
+
 
 def roll_reward(box_level: int) -> str:
+    return roll_single_reward(box_level)
+
+
+def roll_single_reward(box_level: int) -> str:
     roll = random.randint(1, 100)
     table = REWARD_TABLE.get(box_level) or DEFAULT_REWARD_TABLE.get(box_level, [])
     for threshold, name in table:
@@ -815,6 +949,16 @@ def pick_rewards(box_level: int, count: int = 3) -> List[str]:
         return []
     # случайная выборка с возможными повторами, но чаще всего разные
     return random.sample(names, k=min(count, len(names)))
+
+
+def resolve_combo_reward(base_name: str, box_level: int) -> Tuple[str, List[str]]:
+    """Если награда комбинированная — докидывает доп. roll'ы и возвращает список предметов."""
+    lower = base_name.lower()
+    if ("комбо" in lower) or ("+" in base_name):
+        parts = base_name.count("+") + 1
+        rolls = [roll_single_reward(box_level) for _ in range(parts)]
+        return base_name, rolls
+    return base_name, [base_name]
 
 
 # ================== TELEGRAM-БОТ ==================
@@ -835,6 +979,27 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="💰 Профиль", callback_data="menu:profile")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+def reply_menu_kb():
+    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="📍 Квест-карта"),
+                KeyboardButton(text="📝 Дейлики"),
+            ],
+            [
+                KeyboardButton(text="🎁 Лутбоксы"),
+                KeyboardButton(text="📦 Инвентарь"),
+            ],
+            [
+                KeyboardButton(text="💰 Профиль"),
+            ],
+        ],
+        resize_keyboard=True,
+    )
 
 
 def access_denied(user_id: int) -> bool:
@@ -895,7 +1060,7 @@ async def cmd_start(message: Message):
         f"Сейчас у тебя <b>{coins}</b> монет.\n\n"
         "Открыть главное меню: /menu"
     )
-    await message.answer(text, reply_markup=main_menu_kb())
+    await message.answer(text, reply_markup=reply_menu_kb())
 
 
 @dp.message(Command("menu"))
@@ -907,8 +1072,82 @@ async def cmd_menu(message: Message):
     coins = get_coins(message.from_user.id)
     await message.answer(
         f"🏠 <b>Главное меню</b>\nМонет: <b>{coins}</b>",
-        reply_markup=main_menu_kb(),
+        reply_markup=reply_menu_kb(),
     )
+
+
+@dp.message(F.text.in_({"📍 Квест-карта", "📝 Дейлики", "🎁 Лутбоксы", "📦 Инвентарь", "💰 Профиль"}))
+async def on_menu_buttons(message: Message):
+    if access_denied(message.from_user.id):
+        await message.answer("Этот бот приватный 🌙")
+        return
+    text = message.text
+    if text == "📍 Квест-карта":
+        view_text, kb = build_map_view(message.from_user.id)
+        await message.answer(view_text, reply_markup=kb)
+    elif text == "📝 Дейлики":
+        view_text, kb = build_dailies_view(message.from_user.id)
+        await message.answer(view_text, reply_markup=kb)
+    elif text == "🎁 Лутбоксы":
+        uid = message.from_user.id
+        coins = get_coins(uid)
+        text = "🎁 <b>Лутбоксы</b>\n\n"
+        for lvl, box in LOOTBOXES.items():
+            text += f"{lvl}. {box['name']} — <b>{box['price']}</b> монет\n"
+        text += (
+            f"\nУ тебя сейчас <b>{coins}</b> монет.\nВыбери лутбокс, чтобы купить и открыть."
+        )
+        kb = []
+        for lvl, box in LOOTBOXES.items():
+            kb.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{lvl}. {box['name']}",
+                        callback_data=f"buy:{lvl}",
+                    )
+                ]
+            )
+        kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
+        await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    elif text == "📦 Инвентарь":
+        uid = message.from_user.id
+        rewards = get_active_rewards(uid)
+        if not rewards:
+            text = (
+                "📦 Твой инвентарь пока пуст.\n\n"
+                "Заработай монеты за квесты или дейлики и открой лутбокс 🎁\n"
+                "Или получи карту-награду за Мейн-квест."
+            )
+            kb = [
+                [
+                    InlineKeyboardButton(
+                        text="🎁 К лутбоксам", callback_data="menu:loot"
+                    )
+                ],
+                [InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")],
+            ]
+        else:
+            lines = ["📦 <b>Инвентарь</b>\n"]
+            kb = []
+            for rid, name, lvl in rewards:
+                prefix = "🃏" if lvl == 0 else f"[L{lvl}]"
+                lines.append(f"• {prefix} {name}")
+                kb.append(
+                    [
+                        InlineKeyboardButton(
+                            text=f"Использовать: {name[:18]}…",
+                            callback_data=f"use:{rid}",
+                        )
+                    ]
+                )
+            kb.append(
+                [InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")]
+            )
+            text = "\n".join(lines)
+        await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+    elif text == "💰 Профиль":
+        profile_text, kb = build_profile_view(message.from_user.id)
+        await message.answer(profile_text, reply_markup=kb)
 
 
 # ---------- Обработка разделов меню ----------
@@ -925,74 +1164,16 @@ async def cb_menu(callback: CallbackQuery):
 
     # КВЕСТ-КАРТА
     if section == "map":
-        _ensure_unlocks(uid)
-        levels = {}
-        for q in MAIN_QUESTS:
-            lvl = _quest_level(q)
-            levels.setdefault(lvl, []).append(q)
-
-        kb = []
-        lines = ["📍 <b>Квест-карта</b>\n"]
-        for lvl in sorted(levels):
-            quests = levels[lvl]
-            statuses = []
-            level_open = _is_level_open(uid, lvl)
-            for q in quests:
-                st = get_main_status(uid, q["index"])
-                if not level_open:
-                    st = "locked"
-                statuses.append(st)
-            if all(s == "done" for s in statuses):
-                mark = "✅"
-            elif any(s == "active" for s in statuses):
-                mark = "🟡"
-            else:
-                mark = "🔒"
-            title = LEVEL_LABELS.get(lvl, f"Уровень {lvl}")
-            date_range = LEVEL_META.get(lvl, {}).get("dates", "")
-            date_label = f" ({date_range})" if date_range else ""
-            lines.append(f"{mark} {title}{date_label}")
-            kb.append(
-                [
-                    InlineKeyboardButton(
-                        text=f"Открыть {title[:28]}",
-                        callback_data=f"level:{lvl}",
-                    )
-                ]
-            )
-
-        kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
-
+        text, kb = build_map_view(uid)
         await callback.message.edit_text(
-            "\n".join(lines),
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+            text,
+            reply_markup=kb,
         )
 
     # ДЕЙЛИКИ
     elif section == "dailies":
-        today = date.today().isoformat()
-        lines = ["📝 <b>Дейлики на сегодня</b>\n"]
-        kb = []
-
-        for code, info in DAILY_TASKS.items():
-            done = get_daily_done(uid, code, today)
-            mark = "✅" if done else "⬜"
-            lines.append(f"{mark} {info['title']} (+{info['coins']} монет)")
-            kb.append(
-                [
-                    InlineKeyboardButton(
-                        text=f"{'Отменить' if done else 'Сделать'}: {info['title'][:14]}…",
-                        callback_data=f"daily:{code}",
-                    )
-                ]
-            )
-
-        kb.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:profile")])
-
-        await callback.message.edit_text(
-            "\n".join(lines),
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
-        )
+        text, kb = build_dailies_view(uid)
+        await callback.message.edit_text(text, reply_markup=kb)
 
     # ЛУТБОКСЫ
     elif section == "loot":
@@ -1067,11 +1248,10 @@ async def cb_menu(callback: CallbackQuery):
 
     # ПРОФИЛЬ / ГЛАВНОЕ МЕНЮ
     elif section in ("profile", "root"):
-        coins = get_coins(uid)
-        text = f"🏠 <b>Главное меню</b>\nМонет: <b>{coins}</b>"
+        text, kb = build_profile_view(uid)
         await callback.message.edit_text(
             text,
-            reply_markup=main_menu_kb(),
+            reply_markup=kb,
         )
 
     await callback.answer()
@@ -1325,6 +1505,56 @@ async def cb_level(callback: CallbackQuery):
     await callback.answer()
 
 
+@dp.callback_query(F.data == "reset:ask")
+async def cb_reset_ask(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if access_denied(uid):
+        await callback.answer("Этот бот приватный 🌙", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Да, сбросить", callback_data="reset:do"
+                )
+            ],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="menu:profile")],
+        ]
+    )
+    await callback.message.edit_text(
+        "Сбросить игру? Будут удалены монеты, прогресс квестов и награды.",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "reset:do")
+async def cb_reset_do(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if access_denied(uid):
+        await callback.answer("Этот бот приватный 🌙", show_alert=True)
+        return
+    coins = reset_user_progress(uid)
+    _ensure_unlocks(uid)
+    await callback.message.edit_text(
+        f"Игра сброшена. Монет: {coins}. Прогресс очищен.\n/menu",
+        reply_markup=reply_menu_kb(),
+    )
+    await callback.answer("Сброшено")
+
+
+@dp.message(F.text & (lambda msg: msg.from_user.id in DAILY_SEARCH_WAIT))
+async def on_daily_search(message: Message):
+    uid = message.from_user.id
+    DAILY_SEARCH_WAIT.pop(uid, None)
+    query = message.text.strip()
+    if not query or query.startswith("/"):
+        await message.answer("Поиск отменён.")
+        return
+    text, kb = build_dailies_view(uid, search_term=query)
+    await message.answer(text, reply_markup=kb)
+
+
 # ---------- ДЕЙЛИКИ ----------
 
 
@@ -1376,6 +1606,29 @@ async def cb_daily(callback: CallbackQuery):
         "\n".join(lines),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
     )
+
+
+@dp.callback_query(F.data.startswith("dailies:"))
+async def cb_dailies_filter(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if access_denied(uid):
+        await callback.answer("Этот бот приватный 🌙", show_alert=True)
+        return
+
+    action = callback.data.split(":", 2)[1:]
+    filter_coin = "all"
+    search_term = ""
+    if len(action) >= 2 and action[0] == "filter":
+        filter_coin = action[1]
+    elif len(action) >= 1 and action[0] == "search":
+        DAILY_SEARCH_WAIT[uid] = True
+        await callback.answer()
+        await callback.message.answer("🔍 Введи текст для поиска дейликов (или /cancel)")
+        return
+
+    text, kb = build_dailies_view(uid, filter_coin=filter_coin, search_term=search_term)
+    await callback.message.edit_text(text, reply_markup=kb)
+    await callback.answer()
 
 
 # ---------- ЛУТБОКСЫ ----------
